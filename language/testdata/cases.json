@@ -68,6 +68,15 @@
     {"src": "\"bad \\n escape\"", "error": "compile"},
     {"src": "1 # 2", "error": "compile"},
     {"src": "3x", "error": "compile"},
-    {"src": "count = 1", "env": {"count": 1}, "error": "compile"}
+    {"src": "count = 1", "env": {"count": 1}, "error": "compile"},
+    {"src": "1_000_000", "want": 1000000},
+    {"src": "1_000.000_5 * 2", "want": 2000.001},
+    {"src": "1.5e1_0 / 1e10", "want": 1.5},
+    {"src": "1__000", "error": "compile"},
+    {"src": "1_000_", "error": "compile"},
+    {"src": "1_.5", "error": "compile"},
+    {"src": "1._5", "error": "compile"},
+    {"src": "num(\"1_000\") + num(\"2_5.5\")", "want": 1025.5},
+    {"src": "num(\"1__000\")", "error": "eval"}
   ]
 }

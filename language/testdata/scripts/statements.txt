@@ -1,0 +1,328 @@
+Statements, variables and operators. Each case's script/main exports main(); see script_test.go.
+
+=== expressions keep their meaning
+-- script/main --
+export function main(): string {
+  return "slime-" + str(4 % 3) + (1 + 2 * 3 == 7 ? "!" : "?")
+}
+-- want --
+"slime-1!"
+
+=== let, const and inference
+-- script/main --
+export function main(): number {
+  let a = 2
+  const b: number = 3
+  let c: number
+  c = a * b
+  return c
+}
+-- want --
+6
+
+=== compound assignment and increments
+-- script/main --
+export function main(): number {
+  let x = 10
+  x += 5
+  x -= 1
+  x *= 2
+  x /= 4
+  x %= 4
+  x++
+  ++x
+  x--
+  return x
+}
+-- want --
+4
+
+=== strings grow with +=
+-- script/main --
+export function main(): string {
+  let s = "a"
+  s += 1
+  s += true
+  return s
+}
+-- want --
+"a1true"
+
+=== if, else if, else
+-- script/main --
+function grade(n: number): string {
+  if (n >= 90) {
+    return "a"
+  } else if (n >= 50) {
+    return "b"
+  } else {
+    return "c"
+  }
+}
+export function main(): string {
+  return grade(95) + grade(60) + grade(1)
+}
+-- want --
+"abc"
+
+=== while with break and continue
+-- script/main --
+export function main(): number {
+  let i = 0
+  let sum = 0
+  while (true) {
+    i++
+    if (i > 10) { break }
+    if (i % 2 == 0) { continue }
+    sum += i
+  }
+  return sum
+}
+-- want --
+25
+
+=== for loops
+-- script/main --
+export function main(): number {
+  let total = 0
+  for (let i = 0; i < 5; i++) {
+    for (let j = 0; j < i; j++) {
+      total += 1
+    }
+  }
+  return total
+}
+-- want --
+10
+
+=== for of
+-- script/main --
+export function main(): string {
+  let out = ""
+  for (const w of ["a", "b", "c"]) {
+    out += w
+  }
+  return out
+}
+-- want --
+"abc"
+
+=== semicolons are optional, and allowed
+-- script/main --
+export function main(): number { let a = 1; let b = 2; return a + b; }
+-- want --
+3
+
+=== return on its own line returns nothing
+-- script/main --
+import { log } from "test"
+function f(): void {
+  return
+  log("never")
+}
+export function main(): number {
+  f()
+  return 1
+}
+-- want --
+1
+-- logs --
+
+=== comments
+-- script/main --
+// a line comment
+/* a block
+   comment */
+export function main(): number { return /* inline */ 1 }
+-- want --
+1
+
+=== strings in single quotes with escapes
+-- script/main --
+export function main(): string { return 'it\'s\t"x"\n' }
+-- want --
+"it's\t\"x\"\n"
+
+=== === and !== are == and !=
+-- script/main --
+export function main(): bool { return 1 === 1 && "a" !== "b" }
+-- want --
+true
+
+=== recursion
+-- script/main --
+function fib(n: number): number {
+  if (n < 2) { return n }
+  return fib(n - 1) + fib(n - 2)
+}
+export function main(): number { return fib(15) }
+-- want --
+610
+
+=== the standard library computes
+-- script/main --
+export function main(): string {
+  return concat(str(min(3, 1, 2)), str(max(1, 9)), str(clamp(5, 0, 2)), str(round(2.5)), str(int("7.9")), str(len("héllo")))
+}
+-- want --
+"192375"
+
+=== module constants
+-- script/main --
+const BASE = 10
+const DOUBLE: number = BASE * 2
+const NAME = "x" + str(DOUBLE)
+export function main(): string { return NAME }
+-- want --
+"x20"
+
+=== a constant can't change
+-- script/main --
+const A = 1
+export function main(): number {
+  A = 2
+  return A
+}
+-- compile error --
+script/main:3:3: A is a constant
+
+=== a const variable can't change
+-- script/main --
+export function main(): number {
+  const a = 1
+  a = 2
+  return a
+}
+-- compile error --
+script/main:3:3: a is a constant
+
+=== operators are typed at compile time
+-- script/main --
+export function main(): number { return 1 - "x" }
+-- compile error --
+script/main:1:43: - wants numbers
+
+=== comparisons don't mix kinds
+-- script/main --
+export function main(): bool { return 1 == "1" }
+-- compile error --
+== compares a number with a string
+
+=== division by zero fails when it runs
+-- script/main --
+export function main(): number {
+  let z = 0
+  return 1 / z
+}
+-- eval error --
+script/main:3:12: division by zero
+
+=== every path returns
+-- script/main --
+export function main(): number {
+  if (true) { return 1 }
+}
+-- compile error --
+main doesn't return a value on every path
+
+=== void functions return nothing
+-- script/main --
+function f(): void { return 1 }
+export function main(): number { return 1 }
+-- compile error --
+f returns nothing
+
+=== a statement must do something
+-- script/main --
+export function main(): number {
+  let a = 1
+  a == 2
+  return a
+}
+-- compile error --
+script/main:3:3: this does nothing
+
+=== break outside a loop
+-- script/main --
+export function main(): number {
+  break
+  return 1
+}
+-- compile error --
+break and continue are only in loops
+
+=== unknown names
+-- script/main --
+export function main(): number { return nope }
+-- compile error --
+script/main:1:41: unknown name nope
+
+=== a module has no variables
+-- script/main --
+let counter = 0
+-- compile error --
+script/main:1:1: a module can't have variables
+
+=== module constants are primitive
+-- script/main --
+const XS = [1, 2]
+export function main(): number { return 1 }
+-- compile error --
+a module constant is a number, string or bool
+
+=== there is no undefined
+-- script/main --
+export function main(): number { return undefined }
+-- compile error --
+script/main:1:41: unexpected "undefined"
+
+=== the standard library can't be redeclared
+-- script/main --
+function min(a: number): number { return a }
+export function main(): number { return 1 }
+-- compile error --
+min is already declared
+
+=== strings stop at the limit
+-- script/main --
+export function main(): string {
+  let s = "0123456789"
+  while (true) { s += s }
+  return s
+}
+-- eval error --
+a string longer than 4096 characters
+
+=== an endless loop stops at the step budget
+-- script/main --
+export function main(): number {
+  let i = 0
+  while (true) { i++ }
+  return i
+}
+-- eval error --
+ran more than 100000 steps
+
+=== deep recursion stops at the depth budget
+-- script/main --
+function down(n: number): number { return down(n + 1) }
+export function main(): number { return down(0) }
+-- eval error --
+calls nested deeper than 64
+
+=== numbers may group their digits
+-- script/main --
+const MILLION = 1_000_000
+export function main(): number {
+  let budget = 2_500.5
+  budget += 0.000_5
+  return MILLION + budget
+}
+-- want --
+1002500.5005
+
+=== a digit separator goes between digits
+-- script/main --
+export function main(): number { return 1_000_ }
+-- compile error --
+script/main:1:46: a _ in a number goes between two digits

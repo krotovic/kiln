@@ -1,0 +1,270 @@
+Zero values, arrays, maps and strings.
+
+=== every type has a zero value
+-- script/main --
+class Box {}
+class Zeroes {
+  n: number
+  s: string
+  b: bool
+  box: Box
+  xs: number[]
+  m: Map<string, number>
+}
+export function main(): string {
+  const z = new Zeroes()
+  let local: number
+  return str(z.n) + "|" + z.s + "|" + str(z.b) + "|" + str(z.box == null) + "|" + str(z.xs == null) + "|" + str(z.m == null) + "|" + str(local)
+}
+-- want --
+"0||false|true|true|true|0"
+
+=== a null array or map reads as empty
+-- script/main --
+export function main(): number {
+  let xs: number[]
+  let m: Map<string, number>
+  let n = 0
+  for (const x of xs) { n += 100 }
+  return n + xs.length + m.size + m.get("missing") + xs.indexOf(1) + (m.has("a") ? 10 : 0)
+}
+-- want --
+-1
+
+=== writing to a null array fails
+-- script/main --
+export function main(): number {
+  let xs: number[]
+  xs.push(1)
+  return 1
+}
+-- eval error --
+script/main:3:6: push on a null number[]
+
+=== a missing key gives the zero value
+-- script/main --
+export function main(): string {
+  const m = new Map<string, string>()
+  return "[" + m.get("nope") + "]"
+}
+-- want --
+"[]"
+
+=== null goes into any reference
+-- script/main --
+class A {}
+export function main(): bool {
+  let a: A = null
+  let xs: number[] = null
+  return a == null && xs == null
+}
+-- want --
+true
+
+=== null alone has no type
+-- script/main --
+export function main(): number {
+  let a = null
+  return 1
+}
+-- compile error --
+give a a type
+
+=== an empty array needs its type
+-- script/main --
+export function main(): number {
+  let a = []
+  return 1
+}
+-- compile error --
+give the array a type
+
+=== primitives are never null
+-- script/main --
+export function main(): number {
+  let n: number = null
+  return n
+}
+-- compile error --
+n is a null, not a number
+
+=== arrays
+-- script/main --
+export function main(): number[] {
+  let xs: number[] = []
+  xs.push(3, 1, 4)
+  xs[1] = 9
+  xs.push(xs.pop() + 1)
+  return xs.slice(1).slice(-2)
+}
+-- want --
+[9, 5]
+
+=== array searches and joins
+-- script/main --
+export function main(): string {
+  const xs = ["a", "b", "c"]
+  return str(xs.indexOf("c")) + str(xs.includes("z")) + xs.join("-")
+}
+-- want --
+"2falsea-b-c"
+
+=== an index out of range fails
+-- script/main --
+export function main(): number {
+  const xs = [1, 2]
+  return xs[2]
+}
+-- eval error --
+index 2 is out of range (length 2)
+
+=== a fractional index fails
+-- script/main --
+export function main(): number {
+  const xs = [1, 2]
+  return xs[0.5]
+}
+-- eval error --
+index 0.5 is out of range
+
+=== arrays of arrays
+-- script/main --
+export function main(): number {
+  const grid: number[][] = [[1, 2], [3, 4]]
+  grid[1][0] = 7
+  return grid[1][0] + grid[0].length
+}
+-- want --
+9
+
+=== arrays hold one type
+-- script/main --
+export function main(): number {
+  const xs = [1, "a"]
+  return 1
+}
+-- compile error --
+an array of number can't hold a string
+
+=== maps keep their order
+-- script/main --
+export function main(): Map<string, number> {
+  const m = new Map<string, number>()
+  m.set("b", 1)
+  m.set("a", 2)
+  m.set("c", 3)
+  m.set("b", 4)
+  m.delete("a")
+  return m
+}
+-- want --
+{"b": 4, "c": 3}
+
+=== map keys and values
+-- script/main --
+export function main(): string {
+  const m = new Map<number, string>()
+  m.set(2, "two")
+  m.set(1, "one")
+  return m.keys().join(",") + " " + m.values().join(",") + " " + str(m.size) + str(m.has(2))
+}
+-- want --
+"2,1 two,one 2true"
+
+=== maps are read with get
+-- script/main --
+export function main(): number {
+  const m = new Map<string, number>()
+  return m["a"]
+}
+-- compile error --
+read a map with get(key)
+
+=== map keys are numbers or strings
+-- script/main --
+class A {}
+export function main(): number {
+  const m = new Map<A, number>()
+  return 1
+}
+-- compile error --
+a map's keys are numbers or strings
+
+=== strings
+-- script/main --
+export function main(): string[] {
+  const s = "  Héllo World  ".trim()
+  return [s.toUpperCase(), s.toLowerCase(), s.slice(1, 4), str(s.length), str(s.indexOf("W")), str(s.startsWith("Hé")), str(s.endsWith("x")), str(s.includes("lo"))]
+}
+-- want --
+["HÉLLO WORLD", "héllo world", "éll", "11", "6", "true", "false", "true"]
+
+=== split
+-- script/main --
+export function main(): string[] { return "a,b,,c".split(",") }
+-- want --
+["a", "b", "", "c"]
+
+=== arrays have a length but no other field
+-- script/main --
+export function main(): number { return [1].size }
+-- compile error --
+a number[] has no field size
+
+=== arrays stop at the limit
+-- script/main --
+export function main(): number {
+  const xs: number[] = []
+  while (true) { xs.push(1) }
+  return 1
+}
+-- eval error --
+an array longer than 10000
+
+=== the conditional's sides agree
+-- script/main --
+class A {}
+export function main(): bool {
+  const a: A = true ? null : new A()
+  return a == null
+}
+-- want --
+true
+
+=== an element is set in the array as the value left it
+-- script/main --
+class Box {
+  xs: number[] = [0]
+  grow(): number {
+    this.xs.push(1)
+    return 7
+  }
+  shrink(): number {
+    this.xs.pop()
+    return 9
+  }
+}
+export function main(): number[] {
+  const b = new Box()
+  b.xs[0] = b.grow()
+  return b.xs
+}
+-- want --
+[7, 1]
+
+=== an element the value removed can't be set
+-- script/main --
+class Box {
+  xs: number[] = [0, 0]
+  shrink(): number {
+    this.xs.pop()
+    return 9
+  }
+}
+export function main(): number {
+  const b = new Box()
+  b.xs[1] = b.shrink()
+  return 1
+}
+-- eval error --
+index 1 is out of range (length 1)

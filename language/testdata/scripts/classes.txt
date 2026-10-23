@@ -1,0 +1,298 @@
+Classes and interfaces.
+
+=== fields, a constructor and methods
+-- script/main --
+class Counter {
+  count = 0
+  step: number
+  constructor(step: number) {
+    this.step = step
+  }
+  add(): Counter {
+    this.count += this.step
+    return this
+  }
+}
+export function main(): number {
+  const c = new Counter(3)
+  c.add().add()
+  return c.count
+}
+-- want --
+6
+
+=== field values run before the constructor's body
+-- script/main --
+class A {
+  x = 1
+  y: number
+  constructor() { this.y = this.x + 1 }
+}
+export function main(): number { return new A().y }
+-- want --
+2
+
+=== inheritance, super and overrides
+-- script/main --
+class Animal {
+  name: string
+  constructor(name: string) { this.name = name }
+  sound(): string { return "..." }
+  describe(): string { return this.name + " says " + this.sound() }
+}
+class Dog extends Animal {
+  tricks = 0
+  constructor(name: string) {
+    super(name + " the dog")
+    this.tricks = 2
+  }
+  sound(): string { return "woof" }
+  describe(): string { return super.describe() + " and knows " + str(this.tricks) + " tricks" }
+}
+export function main(): string {
+  const a: Animal = new Dog("Rex")
+  return a.describe()
+}
+-- want --
+"Rex the dog says woof and knows 2 tricks"
+
+=== a subclass without a constructor takes its base's
+-- script/main --
+class Base {
+  v: number
+  constructor(v: number) { this.v = v }
+}
+class Derived extends Base {
+  w = 5
+}
+export function main(): number {
+  const d = new Derived(2)
+  return d.v + d.w
+}
+-- want --
+7
+
+=== a derived constructor calls super first
+-- script/main --
+class Base {}
+class Derived extends Base {
+  constructor() { let x = 1 }
+}
+export function main(): number { return 1 }
+-- compile error --
+the constructor of Derived must call super(…) first
+
+=== an override keeps the signature
+-- script/main --
+class Base { f(a: number): number { return a } }
+class Derived extends Base { f(a: string): number { return 1 } }
+export function main(): number { return 1 }
+-- compile error --
+f overrides Base.f(a: number): number with another signature
+
+=== private members
+-- script/main --
+class Safe {
+  private secret = 42
+  private hint(): string { return "x" }
+  peek(): number { return this.secret }
+}
+export function main(): number { return new Safe().secret }
+-- compile error --
+script/main:6:52: secret is private to Safe
+
+=== private members inside the class
+-- script/main --
+class Safe {
+  private secret = 42
+  peek(other: Safe): number { return other.secret + this.secret }
+}
+export function main(): number { const s = new Safe(); return s.peek(s) }
+-- want --
+84
+
+=== readonly fields are set only by the constructor
+-- script/main --
+class P {
+  readonly x: number
+  constructor() { this.x = 1 }
+  move(): void { this.x = 2 }
+}
+export function main(): number { return new P().x }
+-- compile error --
+script/main:4:23: x is readonly
+
+=== a field without a type needs a literal
+-- script/main --
+class P {
+  x = 1 + 1
+}
+export function main(): number { return 1 }
+-- compile error --
+the field x needs a type
+
+=== classes are nominal
+-- script/main --
+class A { x = 1 }
+class B { x = 1 }
+export function main(): number {
+  let a: A = new B()
+  return a.x
+}
+-- compile error --
+a is a B, not a A
+
+=== interfaces are structural
+-- script/main --
+interface HasX { readonly x: number; total(): number }
+class A { x = 1; total(): number { return this.x } }
+class B { x = 2; y = 3; total(): number { return this.x + this.y } }
+function sum(items: HasX[]): number {
+  let s = 0
+  for (const i of items) { s += i.x + i.total() }
+  return s
+}
+export function main(): number { return sum([new A(), new B()]) }
+-- want --
+9
+
+=== implements is checked at the class
+-- script/main --
+interface Named { name(): string }
+class Thing implements Named {
+  name(): number { return 1 }
+}
+export function main(): number { return 1 }
+-- compile error --
+script/main:2:7: Thing doesn't implement Named: name is (): number, not (): string
+
+=== an interface extends interfaces
+-- script/main --
+interface A { a(): number }
+interface B extends A { b(): number }
+class C implements B {
+  a(): number { return 1 }
+  b(): number { return 2 }
+}
+export function main(): number {
+  const x: B = new C()
+  const y: A = x
+  return x.b() + y.a()
+}
+-- want --
+3
+
+=== optional methods may be left out, and scripts don't call them
+-- script/main --
+import { Greeter } from "test"
+class Plain implements Greeter {
+  greet(name: string): string { return "hi " + name }
+}
+export function main(): string {
+  const g: Greeter = new Plain()
+  return g.hello()
+}
+-- compile error --
+hello is optional, so only the host calls it
+
+=== a class may give an optional method
+-- script/main --
+import { Greeter } from "test"
+class Polite implements Greeter {
+  greet(name: string): string { return "good day, " + name }
+  hello(): string { return "hello" }
+}
+export function main(): string {
+  const g: Greeter = new Polite()
+  return g.greet("you")
+}
+-- want --
+"good day, you"
+
+=== an optional method keeps its signature
+-- script/main --
+import { Greeter } from "test"
+class Odd implements Greeter {
+  greet(name: string): string { return name }
+  hello(): number { return 1 }
+}
+export function main(): number { return 1 }
+-- compile error --
+Odd doesn't implement Greeter: hello is (): number, not (): string
+
+=== type aliases
+-- script/main --
+type Name = string
+type Names = Name[]
+export function main(): Names {
+  let n: Names = ["a"]
+  n.push("b")
+  return n
+}
+-- want --
+["a", "b"]
+
+=== a class extending itself
+-- script/main --
+class A extends B {}
+class B extends A {}
+export function main(): number { return 1 }
+-- compile error --
+extends itself
+
+=== objects compare by identity
+-- script/main --
+class A {}
+export function main(): bool {
+  const a = new A()
+  const b = a
+  return a == b && a != new A()
+}
+-- want --
+true
+
+=== methods of null fail
+-- script/main --
+class A { f(): number { return 1 } }
+export function main(): number {
+  let a: A
+  return a.f()
+}
+-- eval error --
+script/main:4:12: f() of null
+
+=== host classes are the host's
+-- script/main --
+import { probe, Probe } from "test"
+export function main(): string {
+  const p: Probe = probe("p1")
+  return p.name + ":" + str(p.twice(21))
+}
+-- want --
+"p1:42"
+
+=== host errors fail the call where it was made
+-- script/main --
+import { probe } from "test"
+export function main(): number { return probe("p").twice(-1) }
+-- eval error --
+script/main:2:52: twice: no negative numbers
+
+=== host classes can't be made or extended
+-- script/main --
+import { Probe } from "test"
+class Mine extends Probe {}
+export function main(): number { return 1 }
+-- compile error --
+Probe is the host's, and can't be extended
+
+=== host fields are readonly
+-- script/main --
+import { probe } from "test"
+export function main(): number {
+  const p = probe("p")
+  p.name = "q"
+  return 1
+}
+-- compile error --
+name is readonly

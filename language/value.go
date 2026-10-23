@@ -1,10 +1,15 @@
-// Package expr is a small, safe expression language that hosts embed to compute values from named inputs.
+// Package language is the game's language, embedded by hosts in two forms.
 //
-// An expression is compiled once against a Library of functions and a Scope of the names it may use, then
-// evaluated any number of times against an Env. Values are numbers, strings or bools, with strict typing: the only
-// implicit conversion is string concatenation with +. There is no assignment, looping, recursion, I/O or
-// randomness, so a compiled Program is deterministic and safe to share between goroutines. See docs/expressions.md.
-package expr
+// Expressions compute a value from named inputs. An expression is compiled once against a Library of functions
+// and a Scope of the names it may use, then evaluated any number of times against an Env. Values are numbers,
+// strings or bools, with strict typing: the only implicit conversion is string concatenation with +. There is no
+// assignment, looping, recursion, I/O or randomness, so a compiled Program is deterministic and safe to share
+// between goroutines.
+//
+// Scripts are statically typed modules with classes, interfaces, functions and statements, built on the same
+// expressions (CompileScript). They import each other and the host's modules, and run under budgets of steps,
+// call depth and memory. See docs/language.md.
+package language
 
 import (
 	"fmt"
@@ -20,6 +25,11 @@ const (
 	Number Kind = iota + 1
 	String
 	Bool
+	// Null, Array, Map and Object are values of scripts only; expressions never see them.
+	Null
+	Array
+	Map
+	Object
 )
 
 func (k Kind) String() string {
@@ -30,16 +40,26 @@ func (k Kind) String() string {
 		return "string"
 	case Bool:
 		return "bool"
+	case Null:
+		return "null"
+	case Array:
+		return "array"
+	case Map:
+		return "map"
+	case Object:
+		return "object"
 	}
 	return "nothing"
 }
 
-// Value is a number, a string or a bool. The zero Value is none of them and only appears as "no value".
+// Value is a number, a string or a bool, or in scripts null, an array, a map or an object (by reference). The zero
+// Value is none of them and only appears as "no value".
 type Value struct {
 	kind Kind
 	num  float64
 	str  string // a string's text, or the text a Literal number was written as
 	b    bool
+	ref  any // *arrayVal, *mapVal or *object
 }
 
 // Num, Str and Boolean make values.
@@ -67,11 +87,20 @@ func (v Value) String() string {
 		return v.str
 	case Bool:
 		return strconv.FormatBool(v.b)
+	case Null:
+		return "null"
+	case Array:
+		return "[array]"
+	case Map:
+		return "[map]"
+	case Object:
+		return "[" + v.ref.(*object).class.name + "]"
 	}
 	return ""
 }
 
-// Interface returns the value as a Go float64, string or bool (nil for no value).
+// Interface returns the value as a Go float64, string or bool (nil for no value and null, an []any for an array,
+// maps and objects give nil).
 func (v Value) Interface() any {
 	switch v.kind {
 	case Number:
@@ -80,9 +109,26 @@ func (v Value) Interface() any {
 		return v.str
 	case Bool:
 		return v.b
+	case Array:
+		items := v.ref.(*arrayVal).items
+		out := make([]any, len(items))
+		for i, item := range items {
+			out[i] = item.Interface()
+		}
+		return out
 	}
 	return nil
 }
+
+// Payload is what the host gave a host object it made (Script.HostObject), or nil for any other value.
+func (v Value) Payload() any {
+	if o, ok := v.ref.(*object); ok {
+		return o.payload
+	}
+	return nil
+}
+
+var null = Value{kind: Null}
 
 // Literal reads a value written as plain text, as value lists in content do: a number when the text is one,
 // "true" and "false" as bools, and a string otherwise. A number keeps its text, so "01" counts as 1 but is still

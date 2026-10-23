@@ -1,0 +1,144 @@
+Modules: imports and exports.
+
+=== importing functions, classes, constants and types
+-- script/util --
+export const GREETING = "hi"
+export function shout(s: string): string { return s.toUpperCase() + "!" }
+export class Pair {
+  a: number
+  b: number
+  constructor(a: number, b: number) { this.a = a; this.b = b }
+  sum(): number { return this.a + this.b }
+}
+export interface Summable { sum(): number }
+export type Count = number
+-- script/main --
+import { GREETING, shout, Pair, Summable, Count } from "script/util"
+export function main(): string {
+  const s: Summable = new Pair(1, 2)
+  const n: Count = s.sum()
+  return shout(GREETING) + str(n)
+}
+-- want --
+"HI!3"
+
+=== aliases and default exports
+-- script/door --
+export default class Door {
+  open(): string { return "creak" }
+}
+export function knock(): string { return "knock" }
+-- script/main --
+import Door, { knock as rap } from "script/door"
+export function main(): string { return rap() + " " + new Door().open() }
+-- want --
+"knock creak"
+
+=== a module imported twice is one module
+-- script/a --
+import { base } from "script/base"
+export function a(): number { return base() + 1 }
+-- script/b --
+import { base } from "script/base"
+export function b(): number { return base() + 2 }
+-- script/base --
+export function base(): number { return 10 }
+-- script/main --
+import { a } from "script/a"
+import { b } from "script/b"
+export function main(): number { return a() + b() }
+-- want --
+23
+
+=== classes extend classes of other modules
+-- script/shape --
+export class Shape {
+  area(): number { return 0 }
+  describe(): string { return "area " + str(this.area()) }
+}
+-- script/main --
+import { Shape } from "script/shape"
+class Square extends Shape {
+  side = 3
+  area(): number { return this.side * this.side }
+}
+export function main(): string { return new Square().describe() }
+-- want --
+"area 9"
+
+=== only exports can be imported
+-- script/util --
+function hidden(): number { return 1 }
+-- script/main --
+import { hidden } from "script/util"
+export function main(): number { return hidden() }
+-- compile error --
+script/main:1:10: script/util doesn't export hidden
+
+=== import cycles are refused
+-- script/a --
+import { b } from "script/b"
+export function a(): number { return 1 }
+-- script/b --
+import { a } from "script/a"
+export function b(): number { return 1 }
+-- script/main --
+import { a } from "script/a"
+export function main(): number { return a() }
+-- compile error --
+import cycle: script/a → script/b → script/a
+
+=== unknown modules
+-- script/main --
+import { x } from "script/nowhere"
+export function main(): number { return 1 }
+-- compile error --
+script/main:1:1: can't import "script/nowhere"
+
+=== imports come first
+-- script/util --
+export const A = 1
+-- script/main --
+export const B = 2
+import { A } from "script/util"
+-- compile error --
+imports come before everything else
+
+=== names clash with imports
+-- script/util --
+export const A = 1
+-- script/main --
+import { A } from "script/util"
+const A = 2
+export function main(): number { return A }
+-- compile error --
+script/main:2:7: A is already declared
+
+=== a module's errors name it
+-- script/util --
+export function f(): number { return "x" }
+-- script/main --
+import { f } from "script/util"
+export function main(): number { return f() }
+-- compile error --
+script/util:1:38: f returns a number, not a string
+
+=== the host's modules
+-- script/main --
+import { log } from "test"
+export function main(): number {
+  log("one")
+  log("two")
+  return 2
+}
+-- want --
+2
+-- logs --
+one
+two
+
+=== host modules don't take natives from scripts
+-- script/main --
+export native function sneaky(): void
+-- compile error --
+only the host's modules declare native code
