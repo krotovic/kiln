@@ -446,7 +446,7 @@ way:
 ```ts
 import { hostObject, loadScript, NativeObject, type HostModule } from "@alo/game/engine/language/index.js";
 
-const ui: HostModule = {
+const ui: HostModule = {                // the game's is uiHost (game/src/game/ui-runner.ts)
   name: "ui",
   source: uiDefinitionFile,             // optional: checked against what the script was compiled with
   natives: {
@@ -633,7 +633,8 @@ export default class Bell implements Behaviour {
 ```
 
 - **Scripts are assets** (`script/<slug>`, an `.als` file; see [Assets](architecture.md#assets)), and a module's ID
-  is its asset's. The asset service compiles a script when it is uploaded, against the `"game"` module and the
+  is its asset's. The asset service compiles a script when it is uploaded, against the `"game"` and `"ui"` modules
+  (a script imports one of them: one importing both, itself or through the scripts it imports, is refused) and the
   scripts it imports, and refuses one that doesn't compile, or whose change would break a script that imports it,
   answering its diagnostics. The editor lists them.
 - **The component** names the script (`asset_id`), the server that runs it (`scope`: `instance`, each instance its
@@ -666,7 +667,11 @@ export default class Bell implements Behaviour {
     readonly parent: string                    // the object it hangs from, "" at the zone's root
     readonly x: number; readonly y: number; readonly h: number; readonly rotation: number  // in the zone
     setContextActive(context: InputContextRef, player: Player, active: boolean): void
+    showUI(ui: UIRef, player: Player): void    // shows the player a UI (instance scripts; see below)
+    hideUI(ui: UIRef, player: Player): void    // closes it, if it is open
   }
+  export native class UIRef { readonly id: string; with(name: string, value: string): UIRef }
+  export native function ui(id: string): UIRef // a UI asset, such as "ui/shop"
   export native class ActionEvent {
     readonly action: string                    // the input definition's action ID, such as "interact"
     readonly context: string                   // the input context it was pressed in ("global": the zone's own)
@@ -710,10 +715,95 @@ export default class Bell implements Behaviour {
   component of that context on the object's path (the object's own, or else its nearest parent's), so any object of
   the subtree can switch it. It fails (and the script stops, as for any error) for a context that doesn't exist, with
   no such component on the path, for a player who isn't in the zone, and outside instance scripts.
+- **UIs.** `ctx.object.showUI(ui("ui/shop"), event.player)` shows the player a UI (see [UI scripts](#ui-scripts));
+  `ui(id).with(name, value)` gives it props its script reads (at most 16, values up to 256 characters), and showing
+  an open UI again shows it anew with the new props. The actions its script sends reach this object's script first,
+  then its parents' (`onAction`, in the action's own context), like a press in an input context of the object:
+  the action must be of the global context or of an input context on the object's path. `hideUI` closes it. At
+  most 8 UIs are open for a player; a UI closes when the object that showed it goes, and when the player leaves the
+  instance. Both fail outside instance scripts and for an ID that isn't `ui/<slug>`, and `showUI` for a ninth UI;
+  for a player who left meanwhile they do nothing.
+
+  ```ts
+  import { Behaviour, Context, ActionEvent, ui, log } from "game"
+
+  // A shopkeeper: "interact" opens the shop's UI; its Buy button sends shop.buy back here.
+  export default class Shopkeeper implements Behaviour {
+    onAction(ctx: Context, event: ActionEvent): void {
+      if (event.action == "interact") {
+        ctx.object.showUI(ui("ui/shop").with("title", "Bram's goods"), event.player)
+        event.handle()
+      } else if (event.action == "shop.buy") {
+        log(event.player.name + " buys")
+        event.handle()
+      }
+    }
+  }
+  ```
 - **Budgets.** Each call (the constructor, `onStart`, one `onUpdate`, one `onAction`, `onStop`) runs under the
   default [budgets](#budgets).
 - **Failures.** A script that doesn't compile, isn't a `Behaviour` or whose call fails is stopped and logged once,
   without `onStop`. It starts again when its object, its component or any of its modules changes.
+
+### UI scripts
+
+A UI is a tree of named nodes made in the [editor](editor.md#ui-editor) and stored as a `ui/<slug>` asset (see
+[UIs](architecture.md#uis)), with the script that is its controller. Its script runs in the player's browser
+(`game/src/game/ui-runner.ts`), on the module the asset service compiled, and imports the `"ui"` module instead of
+`"game"`:
+
+```ts
+import { UIController, UIInteractiveController, UIContext, UIEvent, UIKeyEvent, getUINodeRef } from "ui"
+
+class Buy implements UIInteractiveController {
+  onClick(ctx: UIContext, e: UIEvent): void {
+    ctx.sendAction("shop.buy")
+  }
+}
+
+export default class Shop implements UIController {
+  onStart(ctx: UIContext): void {
+    getUINodeRef("buy").bind(new Buy())
+    getUINodeRef("title").setText(ctx.prop("title"))
+  }
+  onKeyDown(ctx: UIContext, e: UIKeyEvent): void {
+    if (e.key == "Escape") { e.preventDefault(); ctx.close() }
+  }
+}
+```
+
+- **The `"ui"` module** is the definition file `internal/game/ui/ui.d.als` (the code editor opens it as
+  `ui.d.als`). A host module imports nothing, so it declares its own `Behaviour` (`onStart`, `onUpdate` every frame,
+  `onStop` when the UI closes, each with a `UIContext`), which `UIController` extends:
+
+  | Interface | Callbacks | Nodes that send them |
+  | --- | --- | --- |
+  | `UIController` | `onFocus`, `onBlur`, `onKeyDown`, `onKeyUp`, `onPointerEnter`, `onPointerLeave` | every node |
+  | `UIInteractiveController` (extends `UIController`) | `onClick`, `onPointerDown`, `onPointerUp` | button, checkbox, image, panel |
+  | `UIInputController` (extends `UIController`) | `onInput` (as the value changes), `onChange` (once it is made), `onSubmit` (Enter in an input) | input, checkbox, slider |
+
+  Each callback gets the `UIContext` and an event: `UIEvent {node}`, `UIKeyEvent {node, key, code, shift, primary,
+  alt, preventDefault()}` (`primary` is ⌘ on Apple, Ctrl elsewhere) or `UIChangeEvent {node, value}` (a checkbox's
+  value is `"true"` or `"false"`).
+- **The controller.** The script's default export must be a class with a constructor taking no arguments that
+  satisfies `UIController`: it is the root node's controller. `getUINodeRef(name)` finds a node by its name (like
+  `inputContext(name)`, its `exists` is false for none), and `ref.bind(controller)` makes any object of the script
+  the node's controller, in place of the one it had; the runner calls the callbacks it has methods for that the
+  node's type sends, and keeps the object (`Instance.keep`) after every call. A key event goes to the focused
+  node's controller, or, when it has no method for it, up to its parents' controllers; the other events go to the
+  node's own controller only.
+- **`UIContext`**: `ui` (the asset ID), `prop(name)` (what the server script gave it, `""` for none),
+  `sendAction(action)` (presses an action of the input definition, which the instance takes from an open UI; see
+  [Input](architecture.md#input)), `close()` and `now()`.
+- **`UINodeRef`**: `name`, `kind` (the node's type, `""` for none), `exists`; `text`/`setText` (text, button,
+  checkbox), `value`/`setValue` (input, slider: a number), `checked`/`setChecked` (checkbox), `visible`/`setVisible`,
+  `setEnabled` (button, input, checkbox, slider), `setImage` (an `image/` or `sprite/` asset), `focus()` and `bind`.
+  A call on a node that doesn't exist, or of the wrong type, fails.
+- **`log`** writes to the browser's console, at most 20 lines a second.
+- **Checks.** The asset service refuses a UI whose script doesn't compile against `"ui"`, or whose default class
+  isn't a `UIController`, and a change to a script that would break a UI using it. Servers can't run UI scripts:
+  their `"ui"` natives fail, and a UI script on a Script component doesn't load against `"game"`.
+- **Failures.** A call that fails stops the UI's script (without `onStop`) and closes the UI.
 
 ## Tests
 
@@ -744,7 +834,10 @@ and numbers as Go has them, dispatch, loading modules, errors' positions); `benc
 The browser's runtime runs the same cases: `TestWriteBrowserFixtures` (only with `ALO_LANGUAGE_FIXTURES` set; the
 game's `npm test` sets it through `scripts/language-fixtures.mjs`) compiles every case of `testdata/scripts` that
 runs, and a few scripts for instances, into `game/src/engine/language/fixtures/` (not committed), with how Go
-formats, parses and quotes a corpus of numbers and strings; `script.test.ts` runs them.
+formats, parses and quotes a corpus of numbers and strings; `script.test.ts` runs them. The same script writes the
+UI scripts of `internal/game/ui` (its `TestWriteBrowserFixtures`, with `ALO_UI_FIXTURES`), compiled against the
+`"ui"` module, with a document, the definition file and its list of natives, into `game/src/game/fixtures/ui/` (not
+committed); `ui-runner.test.ts` runs them against the browser's `"ui"` host.
 
 The tools have cases of their own in the same format: `testdata/tools/*.txt` (`TestToolCases`), where `‸` in a
 module marks the cursor and the sections say what to expect there: `-- hover --` (the detail, then the doc),

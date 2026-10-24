@@ -12,6 +12,7 @@ import (
 
 	"adventurers-life-online/server/internal/engine/language"
 	"adventurers-life-online/server/internal/game/scripting"
+	"adventurers-life-online/server/internal/game/ui"
 	"adventurers-life-online/server/pkg/auth"
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
@@ -45,7 +46,7 @@ func newFixture(t *testing.T) *fixture {
 	if err := f.library.Refresh(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	srv := NewServer(f.library, f.tokens, func(*auth.SessionClaims) bool { return f.revoked.Load() }, []*language.HostModule{scripting.GameModule()})
+	srv := NewServer(f.library, f.tokens, func(*auth.SessionClaims) bool { return f.revoked.Load() }, []*language.HostModule{scripting.GameModule(), ui.HostModule()})
 	srv.debounce, srv.watch = 10*time.Millisecond, 20*time.Millisecond
 	hs := httptest.NewServer(srv)
 	t.Cleanup(hs.Close)
@@ -440,5 +441,25 @@ func TestHostModulesAreReadOnlyDefinitionFiles(t *testing.T) {
 	}
 	if m = c.call("alo/source", map[string]any{"uri": "alo:/host/nope"}); m.Error == nil {
 		t.Fatal("an unknown host module was read")
+	}
+}
+
+func TestUIScriptsCheckAgainstTheUIModule(t *testing.T) {
+	f := newFixture(t)
+	c := f.dial()
+	c.initialize(f.token("gm", auth.PermWorldEdit))
+	c.open("script/shop-ui", `import { UIController, UIContext, getUINodeRef } from "ui"
+export default class Shop implements UIController {
+  onStart(ctx: UIContext): void { getUINodeRef("title").setText("hi") }
+}`)
+	m := c.call("textDocument/definition", pos("alo:/script/shop-ui", 0, 10))
+	var locs []Location
+	_ = json.Unmarshal(m.Result, &locs)
+	if len(locs) != 1 || locs[0].URI != "alo:/host/ui" {
+		t.Fatalf("definition of UIController: %s %+v", m.Result, m.Error)
+	}
+	m = c.call("alo/source", map[string]any{"uri": "alo:/host/ui"})
+	if !strings.Contains(string(m.Result), "export interface UIController extends Behaviour") || !strings.Contains(string(m.Result), `"readOnly":true`) {
+		t.Fatalf("alo/source of ui: %s %+v", m.Result, m.Error)
 	}
 }

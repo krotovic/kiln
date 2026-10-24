@@ -9,6 +9,7 @@ import (
 
 	"adventurers-life-online/server/internal/engine/language"
 	"adventurers-life-online/server/internal/game/scripting"
+	"adventurers-life-online/server/internal/game/ui"
 	"adventurers-life-online/server/pkg/auth"
 	"adventurers-life-online/server/pkg/config"
 	pb "adventurers-life-online/server/proto/gen"
@@ -32,7 +33,7 @@ func Run(ctx context.Context, cfg *config.LSPConfig) error {
 		go auth.WatchRevocations(ctx, pb.NewWorldServiceClient(conn), revocations, 5*time.Second)
 	}
 	srv := NewServer(library, auth.NewTokenManager(cfg.JWTSecret, 24*time.Hour), revocations.Revoked,
-		[]*language.HostModule{scripting.GameModule()})
+		[]*language.HostModule{scripting.GameModule(), ui.HostModule()})
 
 	mux := http.NewServeMux()
 	mux.Handle("/lsp", srv)
