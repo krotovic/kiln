@@ -171,7 +171,7 @@ type fieldInfo struct {
 	private  bool
 	readonly bool
 	decl     *fieldDecl
-	init     evalFn
+	init     irExpr
 	getter   NativeFunc  // a native class's field
 	mod      *moduleInfo // where it is declared
 }
@@ -194,9 +194,9 @@ type funcInfo struct {
 	decl     *funcDecl
 	params   []*Type
 	names    []string
-	result   *Type // typVoid for none
-	nlocals  int
-	body     execFn
+	result   *Type   // typVoid for none
+	locals   []*Type // its variables' types by slot, its parameters first
+	body     *irBlock
 	native   NativeFunc
 	owner    *classInfo // methods and constructors
 	private  bool
@@ -250,15 +250,36 @@ func (i *ifaceInfo) extends(base *ifaceInfo) bool {
 	return false
 }
 
-// satisfies says why c doesn't satisfy i, or "" when it does: c needs every field of i with the same type (a
-// field i may change must not be readonly in c) and every method that isn't optional with the same signature, all
-// public. An optional method c has must match too.
+// member is what an interface's member is checked against: a class's field or method, by its signature or type
+// as messages write it and as types compare (canon).
+type member struct {
+	method, private, readonly bool
+	text, canon               string
+}
+
+// satisfies says why c doesn't satisfy i, or "" when it does (satisfiesBy).
 func (c *classInfo) satisfies(i *ifaceInfo) string {
+	return satisfiesBy(i, func(name string) (member, bool) {
+		if m := c.methods[name]; m != nil {
+			return member{method: true, private: m.private, text: m.signature(), canon: canonSig(m)}, true
+		}
+		if f := c.fieldByName[name]; f != nil {
+			return member{private: f.private, readonly: f.readonly, text: f.typ.String(), canon: canon(f.typ)}, true
+		}
+		return member{}, false
+	})
+}
+
+// satisfiesBy says why a class whose members get finds doesn't satisfy i, or "" when it does: it needs every
+// field of i with the same type (a field i may change must not be readonly in it) and every method that isn't
+// optional with the same signature, all public. An optional method it has must match too. Compiled scripts are
+// checked by the same rules (Class.Satisfies).
+func satisfiesBy(i *ifaceInfo, get func(name string) (member, bool)) string {
 	for _, name := range i.order {
+		cm, has := get(name)
 		if m, ok := i.methods[name]; ok {
-			cm := c.methods[name]
-			if cm == nil {
-				if _, isField := c.fieldByName[name]; isField {
+			if !has || !cm.method {
+				if has {
 					return name + " is a field, not a method"
 				}
 				if m.optional {
@@ -269,23 +290,22 @@ func (c *classInfo) satisfies(i *ifaceInfo) string {
 			if cm.private {
 				return name + " is private"
 			}
-			if !cm.sameSignature(m) {
-				return name + " is " + cm.signature() + ", not " + m.signature()
+			if cm.canon != canonSig(m) {
+				return name + " is " + cm.text + ", not " + m.signature()
 			}
 			continue
 		}
 		f := i.fields[name]
-		cf := c.fieldByName[name]
-		if cf == nil {
+		if !has || cm.method {
 			return "it lacks the field " + name
 		}
-		if cf.private {
+		if cm.private {
 			return name + " is private"
 		}
-		if !identical(cf.typ, f.typ) {
-			return name + " is " + cf.typ.String() + ", not " + f.typ.String()
+		if cm.canon != canon(f.typ) {
+			return name + " is " + cm.text + ", not " + f.typ.String()
 		}
-		if cf.readonly && !f.readonly {
+		if cm.readonly && !f.readonly {
 			return name + " is readonly"
 		}
 	}

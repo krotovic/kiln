@@ -2,7 +2,6 @@ package language
 
 import (
 	"fmt"
-	"unicode/utf8"
 )
 
 var sprintf = fmt.Sprintf
@@ -22,11 +21,11 @@ type funcCtx struct {
 	class  *classInfo // the class whose code this is, for this and private members
 	fn     *funcInfo  // nil for field values and constants
 	scopes []map[string]*local
-	// maxLocals is how many slots the function's frame needs: every variable gets its own
-	maxLocals int
-	loops     int
-	ctor      bool // in a constructor, where its class's readonly fields may be set
-	inInit    bool // in a field's value
+	// slots are the types of the function's variables, parameters first: every variable gets its own slot
+	slots  []*Type
+	loops  int
+	ctor   bool // in a constructor, where its class's readonly fields may be set
+	inInit bool // in a field's value
 }
 
 func (c *checker) newFuncCtx(m *moduleInfo, class *classInfo, fn *funcInfo) *funcCtx {
@@ -54,8 +53,8 @@ func (fc *funcCtx) declareAs(name string, t *Type, constant, param bool, pos int
 	if _, dup := scope[name]; dup {
 		fc.errorf(pos, "%s is already declared here", name)
 	}
-	l := &local{slot: fc.maxLocals, typ: t, constant: constant, param: param, pos: pos}
-	fc.maxLocals++
+	l := &local{slot: len(fc.slots), typ: t, constant: constant, param: param, pos: pos}
+	fc.slots = append(fc.slots, t)
 	scope[name] = l
 	fc.record(pos, name, localRef(l, name, fc.m, true))
 	return l
@@ -85,31 +84,36 @@ func (fc *funcCtx) lookup(name string) *local {
 // canSee reports whether code here may use a member of owner that may be private.
 func (fc *funcCtx) canSee(owner *classInfo, private bool) bool { return !private || fc.class == owner }
 
-func bad(*frame) (Value, error) { return Value{}, nil }
-
-func constant(v Value) evalFn { return func(*frame) (Value, error) { return v, nil } }
+// literal is the IR of a literal value.
+func literal(v Value) irExpr {
+	switch v.kind {
+	case Number:
+		return &irNum{v: v.num}
+	case String:
+		return &irStr{s: v.str}
+	}
+	return &irBool{v: v.b}
+}
 
 // expr checks an expression and returns its code and type. want, when not nil, is the type the place it goes
 // expects, which gives empty arrays and null their types.
-func (fc *funcCtx) expr(n node, want *Type) (evalFn, *Type) {
-	m := fc.m
+func (fc *funcCtx) expr(n node, want *Type) (irExpr, *Type) {
 	switch n := n.(type) {
 	case *literalNode:
-		switch n.v.kind {
-		case Number:
-			return constant(n.v), typNumber
-		case String:
-			return constant(n.v), typString
-		}
-		return constant(n.v), typBool
+		e := literal(n.v)
+		return e, e.typeOf()
 	case *nullNode:
-		return constant(null), typNull
+		t := typNull
+		if want != nil && want.isRef() {
+			t = want
+		}
+		return &irNull{irBase{t}}, typNull
 	case *thisNode:
 		if fc.class == nil {
 			fc.errorf(n.pos, "this is only in a class's code")
 			return bad, typInvalid
 		}
-		return func(fr *frame) (Value, error) { return fr.this, nil }, fc.class.typ
+		return &irThis{irBase{fc.class.typ}}, fc.class.typ
 	case *nameNode:
 		return fc.name(n)
 	case *unaryNode:
@@ -122,43 +126,17 @@ func (fc *funcCtx) expr(n node, want *Type) (evalFn, *Type) {
 				fc.errorf(n.pos, "! wants a bool, not a %s", t)
 				return bad, typInvalid
 			}
-			return func(fr *frame) (Value, error) {
-				v, err := x(fr)
-				if err != nil {
-					return Value{}, err
-				}
-				return Boolean(!v.b), nil
-			}, typBool
+			return &irNot{x: x}, typBool
 		}
 		if t.kind != tNumber {
 			fc.errorf(n.pos, "- wants a number, not a %s", t)
 			return bad, typInvalid
 		}
-		return func(fr *frame) (Value, error) {
-			v, err := x(fr)
-			if err != nil {
-				return Value{}, err
-			}
-			return Num(-v.num), nil
-		}, typNumber
+		return &irNeg{x: x}, typNumber
 	case *binaryNode:
 		l, lt := fc.expr(n.l, nil)
 		r, rt := fc.expr(n.r, nil)
-		op, t := fc.binaryOp(n.op, lt, rt, n.pos)
-		if op == nil {
-			return bad, t
-		}
-		return func(fr *frame) (Value, error) {
-			a, err := l(fr)
-			if err != nil {
-				return Value{}, err
-			}
-			b, err := r(fr)
-			if err != nil {
-				return Value{}, err
-			}
-			return op(fr, a, b)
-		}, t
+		return fc.binaryOp(n.op, l, r, lt, rt, n.pos)
 	case *logicalNode:
 		l, lt := fc.expr(n.l, nil)
 		r, rt := fc.expr(n.r, nil)
@@ -166,14 +144,7 @@ func (fc *funcCtx) expr(n node, want *Type) (evalFn, *Type) {
 			fc.errorf(n.pos, "%s wants bools, not a %s and a %s", n.op, lt, rt)
 			return bad, typInvalid
 		}
-		and := n.op == "&&"
-		return func(fr *frame) (Value, error) {
-			a, err := l(fr)
-			if err != nil || a.b != and {
-				return a, err
-			}
-			return r(fr)
-		}, typBool
+		return &irLogic{and: n.op == "&&", l: l, r: r}, typBool
 	case *condNode:
 		cond, ct := fc.expr(n.c, nil)
 		if ct.kind != tBool && ct.kind != tInvalid {
@@ -186,16 +157,7 @@ func (fc *funcCtx) expr(n node, want *Type) (evalFn, *Type) {
 			fc.errorf(n.pos, "the sides of ? : are a %s and a %s", at, bt)
 			return bad, typInvalid
 		}
-		return func(fr *frame) (Value, error) {
-			c, err := cond(fr)
-			if err != nil {
-				return Value{}, err
-			}
-			if c.b {
-				return a(fr)
-			}
-			return b(fr)
-		}, t
+		return &irCond{irBase{t}, cond, a, b}, t
 	case *callNode:
 		return fc.call(n)
 	case *memberNode:
@@ -217,14 +179,7 @@ func (fc *funcCtx) expr(n node, want *Type) (evalFn, *Type) {
 		if it.kind != tNumber && it.kind != tInvalid {
 			fc.errorf(n.i.position(), "an index is a number, not a %s", it)
 		}
-		pos := n.pos
-		return func(fr *frame) (Value, error) {
-			items, idx, err := index(fr, x, i, m, pos)
-			if err != nil {
-				return Value{}, err
-			}
-			return items[idx], nil
-		}, xt.elem
+		return &irIndex{irBase{xt.elem}, x, i, n.pos}, xt.elem
 	case *methodCallNode:
 		return fc.methodCall(n)
 	case *superCallNode:
@@ -241,27 +196,6 @@ func (fc *funcCtx) expr(n node, want *Type) (evalFn, *Type) {
 	return bad, typInvalid
 }
 
-// index evaluates x[i] up to the element: the array's items and the index, checked.
-func index(fr *frame, x, i evalFn, m *moduleInfo, pos int) ([]Value, int, error) {
-	a, err := x(fr)
-	if err != nil {
-		return nil, 0, err
-	}
-	iv, err := i(fr)
-	if err != nil {
-		return nil, 0, err
-	}
-	var items []Value
-	if a.kind == Array {
-		items = a.ref.(*arrayVal).items
-	}
-	n := iv.num
-	if n != float64(int(n)) || n < 0 || int(n) >= len(items) {
-		return nil, 0, m.errAt(pos, "index %s is out of range (length %d)", iv, len(items))
-	}
-	return items, int(n), nil
-}
-
 func unify(a, b *Type) *Type {
 	switch {
 	case a.kind == tInvalid:
@@ -276,15 +210,14 @@ func unify(a, b *Type) *Type {
 	return nil
 }
 
-func (fc *funcCtx) name(n *nameNode) (evalFn, *Type) {
+func (fc *funcCtx) name(n *nameNode) (irExpr, *Type) {
 	if fc.probing(n.name) {
 		fc.c.rec.probe.names(fc)
 		return bad, typInvalid
 	}
 	if l := fc.lookup(n.name); l != nil {
 		fc.record(n.pos, n.name, localRef(l, n.name, fc.m, false))
-		slot := l.slot
-		return func(fr *frame) (Value, error) { return fr.locals[slot], nil }, l.typ
+		return &irLocal{irBase{l.typ}, l.slot}, l.typ
 	}
 	sym := fc.m.symbols[n.name]
 	switch {
@@ -301,8 +234,7 @@ func (fc *funcCtx) name(n *nameNode) (evalFn, *Type) {
 			return bad, typInvalid
 		}
 		fc.record(n.pos, n.name, fc.c.symbolRef(sym, false, aliasLoc(fc.m, sym, n.name)))
-		mod, slot := k.mod, k.slot
-		return func(*frame) (Value, error) { return mod.globals[slot], nil }, k.typ
+		return &irConst{irBase{k.typ}, k}, k.typ
 	case sym.kind == symFunc:
 		fc.errorf(n.pos, "%s is a function: call it", n.name)
 	case sym.kind == symClass:
@@ -313,12 +245,11 @@ func (fc *funcCtx) name(n *nameNode) (evalFn, *Type) {
 	return bad, typInvalid
 }
 
-// binaryOp checks a binary operator on operands of types lt and rt, and returns its code and result type, or
-// nil code when it doesn't apply (and says so).
-func (fc *funcCtx) binaryOp(op string, lt, rt *Type, pos int) (func(fr *frame, a, b Value) (Value, error), *Type) {
-	m := fc.m
+// binaryOp checks a binary operator on operands of types lt and rt, and returns its code and result type; the
+// code is bad when it doesn't apply (and says so).
+func (fc *funcCtx) binaryOp(op string, l, r irExpr, lt, rt *Type, pos int) (irExpr, *Type) {
 	if lt.kind == tInvalid || rt.kind == tInvalid {
-		return nil, typInvalid
+		return bad, typInvalid
 	}
 	switch op {
 	case "==", "!=":
@@ -326,26 +257,18 @@ func (fc *funcCtx) binaryOp(op string, lt, rt *Type, pos int) (func(fr *frame, a
 			(lt.isRef() && rt.isRef() && (assignable(lt, rt) || assignable(rt, lt)))
 		if !ok {
 			fc.errorf(pos, "%s compares a %s with a %s", op, lt, rt)
-			return nil, typInvalid
+			return bad, typInvalid
 		}
-		eq := op == "=="
-		return func(_ *frame, a, b Value) (Value, error) { return Boolean(sameValue(a, b) == eq), nil }, typBool
+		return &irEqual{neq: op == "!=", l: l, r: r}, typBool
 	case "<", "<=", ">", ">=":
 		if !((lt.kind == tNumber && rt.kind == tNumber) || (lt.kind == tString && rt.kind == tString)) {
 			fc.errorf(pos, "%s compares numbers or strings, not a %s with a %s", op, lt, rt)
-			return nil, typInvalid
+			return bad, typInvalid
 		}
-		cmp := &binaryNode{op: op}
-		return func(_ *frame, a, b Value) (Value, error) { return cmp.compare(a, b) }, typBool
+		return &irCompare{op: op, l: l, r: r}, typBool
 	case "+":
 		if (lt.kind == tString || rt.kind == tString) && lt.primitive() && rt.primitive() {
-			return func(fr *frame, a, b Value) (Value, error) {
-				s := a.String() + b.String()
-				if err := fr.vm.checkString(m, pos, s); err != nil {
-					return Value{}, err
-				}
-				return Str(s), nil
-			}, typString
+			return &irConcat{l: l, r: r, pos: pos}, typString
 		}
 	}
 	if lt.kind != tNumber || rt.kind != tNumber {
@@ -354,52 +277,34 @@ func (fc *funcCtx) binaryOp(op string, lt, rt *Type, pos int) (func(fr *frame, a
 		} else {
 			fc.errorf(pos, "%s wants numbers, not a %s and a %s", op, lt, rt)
 		}
-		return nil, typInvalid
+		return bad, typInvalid
 	}
-	return func(_ *frame, a, b Value) (Value, error) {
-		f, msg := arith(op, a.num, b.num)
-		if msg != "" {
-			return Value{}, m.errAt(pos, "%s", msg)
-		}
-		return Num(f), nil
-	}, typNumber
+	return &irArith{op: op[0], l: l, r: r, pos: pos}, typNumber
 }
 
 // args checks a call's arguments against params, each given its parameter's type as the type it wants.
-func (fc *funcCtx) args(pos int, what string, params []*Type, args []node) []evalFn {
+func (fc *funcCtx) args(pos int, what string, params []*Type, args []node) []irExpr {
 	if len(args) != len(params) {
 		fc.errorf(pos, "%s takes %s, not %d", what, plural(len(params)), len(args))
 	}
-	fns := make([]evalFn, len(args))
+	out := make([]irExpr, len(args))
 	for i, a := range args {
 		var want *Type
 		if i < len(params) {
 			want = params[i]
 		}
-		fn, t := fc.expr(a, want)
+		e, t := fc.expr(a, want)
 		if want != nil && !assignable(t, want) {
 			fc.errorf(a.position(), "argument %d of %s is a %s, not a %s", i+1, what, t, want)
 		}
-		fns[i] = fn
+		out[i] = e
 	}
-	return fns
-}
-
-func evalArgs(fr *frame, fns []evalFn) ([]Value, error) {
-	vals := make([]Value, len(fns))
-	for i, fn := range fns {
-		v, err := fn(fr)
-		if err != nil {
-			return nil, err
-		}
-		vals[i] = v
-	}
-	return vals, nil
+	return out
 }
 
 // call checks a call of a function by name: one of the module's, an imported one, or the standard library's.
-func (fc *funcCtx) call(n *callNode) (evalFn, *Type) {
-	m, pos := fc.m, n.pos
+func (fc *funcCtx) call(n *callNode) (irExpr, *Type) {
+	pos := n.pos
 	if fc.probing(n.name) {
 		fc.c.rec.probe.names(fc)
 		for _, a := range n.args {
@@ -440,17 +345,11 @@ func (fc *funcCtx) call(n *callNode) (evalFn, *Type) {
 	}
 	fc.record(pos, n.name, fc.c.symbolRef(sym, false, aliasLoc(fc.m, sym, n.name)))
 	args := fc.args(pos, n.name, fn.params, n.args)
-	return func(fr *frame) (Value, error) {
-		vals, err := evalArgs(fr, args)
-		if err != nil {
-			return Value{}, err
-		}
-		return fr.vm.call(fn, Value{}, vals, m, pos)
-	}, fn.result
+	return &irCall{irBase{fn.result}, fn, args, pos}, fn.result
 }
 
-func (fc *funcCtx) member(n *memberNode) (evalFn, *Type) {
-	m, pos := fc.m, n.pos
+func (fc *funcCtx) member(n *memberNode) (irExpr, *Type) {
+	pos := n.pos
 	x, xt := fc.expr(n.x, nil)
 	if fc.probing(n.name) {
 		fc.c.rec.probe.members(fc, xt)
@@ -470,21 +369,7 @@ func (fc *funcCtx) member(n *memberNode) (evalFn, *Type) {
 			return bad, typInvalid
 		}
 		fc.record(pos, n.name, Ref{Kind: RefBuiltin, Detail: "(property) " + xt.String() + "." + n.name + ": number"})
-		return func(fr *frame) (Value, error) {
-			v, err := x(fr)
-			if err != nil {
-				return Value{}, err
-			}
-			switch v.kind {
-			case String:
-				return Num(float64(utf8.RuneCountInString(v.str))), nil
-			case Array:
-				return Num(float64(len(v.ref.(*arrayVal).items))), nil
-			case Map:
-				return Num(float64(len(v.ref.(*mapVal).keys))), nil
-			}
-			return Num(0), nil // a null array or map is empty
-		}, typNumber
+		return &irLength{x: x}, typNumber
 	case tClass:
 		ci := xt.class
 		f := ci.fieldByName[n.name]
@@ -500,13 +385,7 @@ func (fc *funcCtx) member(n *memberNode) (evalFn, *Type) {
 			fc.errorf(pos, "%s is private to %s", n.name, f.owner.name)
 		}
 		fc.record(pos, n.name, fieldRef(f.owner.name, f, false))
-		return func(fr *frame) (Value, error) {
-			o, err := receiver(fr, x, m, pos, n.name)
-			if err != nil {
-				return Value{}, err
-			}
-			return fr.vm.readField(o, f, m, pos)
-		}, f.typ
+		return &irField{irBase{f.typ}, x, f, pos}, f.typ
 	case tIface:
 		f := xt.iface.fields[n.name]
 		if f == nil {
@@ -518,33 +397,14 @@ func (fc *funcCtx) member(n *memberNode) (evalFn, *Type) {
 			return bad, typInvalid
 		}
 		fc.record(pos, n.name, fieldRef(xt.iface.name, f, false))
-		name := n.name
-		return func(fr *frame) (Value, error) {
-			o, err := receiver(fr, x, m, pos, name)
-			if err != nil {
-				return Value{}, err
-			}
-			return fr.vm.readField(o, o.class.fieldByName[name], m, pos)
-		}, f.typ
+		return &irIfaceField{irBase{f.typ}, x, n.name, pos}, f.typ
 	}
 	fc.errorf(pos, "a %s has no fields", xt)
 	return bad, typInvalid
 }
 
-// receiver evaluates the object a member is used on, refusing null.
-func receiver(fr *frame, x evalFn, m *moduleInfo, pos int, member string) (*object, error) {
-	v, err := x(fr)
-	if err != nil {
-		return nil, err
-	}
-	if v.kind != Object {
-		return nil, m.errAt(pos, "%s of null", member)
-	}
-	return v.ref.(*object), nil
-}
-
-func (fc *funcCtx) methodCall(n *methodCallNode) (evalFn, *Type) {
-	m, pos := fc.m, n.pos
+func (fc *funcCtx) methodCall(n *methodCallNode) (irExpr, *Type) {
+	pos := n.pos
 	x, xt := fc.expr(n.recv, nil)
 	if fc.probing(n.name) {
 		fc.c.rec.probe.members(fc, xt)
@@ -589,22 +449,11 @@ func (fc *funcCtx) methodCall(n *methodCallNode) (evalFn, *Type) {
 	}
 	fc.record(pos, n.name, methodRef(owner, fn, false))
 	args := fc.args(pos, n.name, fn.params, n.args)
-	name := n.name
-	return func(fr *frame) (Value, error) {
-		o, err := receiver(fr, x, m, pos, name+"()")
-		if err != nil {
-			return Value{}, err
-		}
-		vals, err := evalArgs(fr, args)
-		if err != nil {
-			return Value{}, err
-		}
-		return fr.vm.call(o.class.methods[name], Value{kind: Object, ref: o}, vals, m, pos)
-	}, fn.result
+	return &irMethod{irBase{fn.result}, x, fn, n.name, xt.kind == tIface, args, pos}, fn.result
 }
 
-func (fc *funcCtx) superMethod(n *superMethodNode) (evalFn, *Type) {
-	m, pos := fc.m, n.pos
+func (fc *funcCtx) superMethod(n *superMethodNode) (irExpr, *Type) {
+	pos := n.pos
 	if fc.class == nil || fc.class.super == nil || fc.inInit {
 		fc.errorf(pos, "super is only in the methods of a class that extends another")
 		return bad, typInvalid
@@ -620,31 +469,17 @@ func (fc *funcCtx) superMethod(n *superMethodNode) (evalFn, *Type) {
 	}
 	fc.record(pos, n.name, methodRef(fn.owner.name, fn, false))
 	args := fc.args(pos, n.name, fn.params, n.args)
-	return func(fr *frame) (Value, error) {
-		vals, err := evalArgs(fr, args)
-		if err != nil {
-			return Value{}, err
-		}
-		return fr.vm.call(fn, fr.this, vals, m, pos)
-	}, fn.result
+	return &irSuper{irBase{fn.result}, fn, args, pos}, fn.result
 }
 
 // superCall checks super(args) at the start of a constructor.
-func (fc *funcCtx) superCall(n *superCallNode) execFn {
-	m, pos := fc.m, n.pos
+func (fc *funcCtx) superCall(n *superCallNode) irStmt {
 	super := fc.class.super
-	args := fc.args(pos, "super", super.ctor.params, n.args)
-	return func(fr *frame) (flow, error) {
-		vals, err := evalArgs(fr, args)
-		if err != nil {
-			return flowNext, err
-		}
-		_, err = fr.vm.call(super.ctor, fr.this, vals, m, pos)
-		return flowNext, err
-	}
+	args := fc.args(n.pos, "super", super.ctor.params, n.args)
+	return &irSuperCall{ctor: super.ctor, args: args, pos: n.pos}
 }
 
-func (fc *funcCtx) newExpr(n *newNode) (evalFn, *Type) {
+func (fc *funcCtx) newExpr(n *newNode) (irExpr, *Type) {
 	m, pos := fc.m, n.pos
 	t := fc.c.resolveType(m, n.typ)
 	switch t.kind {
@@ -654,12 +489,7 @@ func (fc *funcCtx) newExpr(n *newNode) (evalFn, *Type) {
 		if len(n.args) > 0 {
 			fc.errorf(pos, "new Map takes no arguments")
 		}
-		return func(fr *frame) (Value, error) {
-			if err := fr.vm.alloc(m, pos, valueSize); err != nil {
-				return Value{}, err
-			}
-			return Value{kind: Map, ref: &mapVal{index: map[mapKey]int{}}}, nil
-		}, t
+		return &irNewMap{irBase{t}, pos}, t
 	case tClass:
 		ci := t.class
 		if ci.native {
@@ -670,35 +500,22 @@ func (fc *funcCtx) newExpr(n *newNode) (evalFn, *Type) {
 			return bad, typInvalid // it failed to resolve
 		}
 		args := fc.args(pos, "new "+ci.name, ci.ctor.params, n.args)
-		return func(fr *frame) (Value, error) {
-			vals, err := evalArgs(fr, args)
-			if err != nil {
-				return Value{}, err
-			}
-			obj, err := fr.vm.newObject(ci, m, pos)
-			if err != nil {
-				return Value{}, err
-			}
-			if _, err := fr.vm.call(ci.ctor, obj, vals, m, pos); err != nil {
-				return Value{}, err
-			}
-			return obj, nil
-		}, t
+		return &irNew{irBase{t}, ci, args, pos}, t
 	}
 	fc.errorf(pos, "only classes and maps are made with new, not %s", t)
 	return bad, typInvalid
 }
 
-func (fc *funcCtx) array(n *arrayNode, want *Type) (evalFn, *Type) {
-	m, pos := fc.m, n.pos
+func (fc *funcCtx) array(n *arrayNode, want *Type) (irExpr, *Type) {
+	pos := n.pos
 	var elem *Type
 	if want != nil && want.kind == tArray {
 		elem = want.elem
 	}
-	items := make([]evalFn, len(n.items))
+	items := make([]irExpr, len(n.items))
 	for i, item := range n.items {
-		fn, t := fc.expr(item, elem)
-		items[i] = fn
+		e, t := fc.expr(item, elem)
+		items[i] = e
 		switch {
 		case elem == nil && t.kind != tNull:
 			elem = t
@@ -711,17 +528,6 @@ func (fc *funcCtx) array(n *arrayNode, want *Type) (evalFn, *Type) {
 		fc.errorf(pos, "give the array a type, as in let xs: number[] = []")
 		return bad, typInvalid
 	}
-	return func(fr *frame) (Value, error) {
-		if err := fr.vm.checkLength(m, pos, len(items), "array"); err != nil {
-			return Value{}, err
-		}
-		if err := fr.vm.alloc(m, pos, valueSize*(len(items)+1)); err != nil {
-			return Value{}, err
-		}
-		vals, err := evalArgs(fr, items)
-		if err != nil {
-			return Value{}, err
-		}
-		return Value{kind: Array, ref: &arrayVal{items: vals}}, nil
-	}, arrayOf(elem)
+	t := arrayOf(elem)
+	return &irArray{irBase{t}, items, pos}, t
 }

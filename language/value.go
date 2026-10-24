@@ -94,7 +94,12 @@ func (v Value) String() string {
 	case Map:
 		return "[map]"
 	case Object:
-		return "[" + v.ref.(*object).class.name + "]"
+		switch r := v.ref.(type) {
+		case *object:
+			return "[" + r.class.name + "]"
+		case *scriptRef:
+			return "[" + r.in.script.meta.Classes[r.class].Name + "]"
+		}
 	}
 	return ""
 }

@@ -88,7 +88,6 @@ type moduleInfo struct {
 	host    *HostModule
 	symbols map[string]*symbol
 	exports map[string]*symbol
-	globals []Value
 	consts  []*constInfo
 	imports []string
 	// aliases are where names imported under another name (with as, or a default import) were imported
@@ -114,17 +113,10 @@ func (m *moduleInfo) lineCol(pos int) (int, int) {
 	return line + 1, pos - m.lines[line] + 1
 }
 
-// Script is a compiled script: its entry module and every module it imports, checked together. A Script is
-// immutable (module constants are numbers, strings and bools, computed once) and safe to use from many
-// goroutines; each Instance belongs to one goroutine at a time.
-type Script struct {
-	entry   *moduleInfo
-	modules []*moduleInfo // dependencies first, the entry last; host modules aside
-	limits  ScriptLimits
-}
-
-// CompileScript loads the module entry from src with everything it imports, and checks it all against the
-// host modules. It reports every problem it finds (up to 50) as diagnostics.
+// CompileScript loads the module entry from src with everything it imports, checks it all against the host
+// modules, and compiles it to WebAssembly (Script.Module). It reports every problem it finds (up to 50) as
+// diagnostics. The module's constants are computed when it compiles, so one that fails is a diagnostic too. Its
+// machine code is made only when it is first instantiated, so a host that only wants the module makes none.
 func CompileScript(entry string, src Source, opts ScriptOptions) (*Script, []Diagnostic) {
 	c := newChecker(opts)
 	c.loadAll(entry, src)
@@ -137,165 +129,25 @@ func CompileScript(entry string, src Source, opts ScriptOptions) (*Script, []Dia
 	if len(c.diags) > 0 {
 		return nil, c.diags
 	}
-	return &Script{entry: c.modules[entry], modules: c.order, limits: c.limits}, nil
-}
-
-// Modules lists the IDs of the script's modules: the entry and everything it imports, host modules aside.
-func (s *Script) Modules() []string {
-	out := make([]string, len(s.modules))
-	for i, m := range s.modules {
-		out[i] = m.id
-	}
-	return out
-}
-
-// Class is a class a script exports.
-type Class struct {
-	info   *classInfo
-	script *Script
-}
-
-// Interface is an interface a host module or script exports.
-type Interface struct{ info *ifaceInfo }
-
-// DefaultClass is the class the entry module exports as default.
-func (s *Script) DefaultClass() (*Class, bool) { return s.Class("default") }
-
-// Class finds a class the entry module exports.
-func (s *Script) Class(name string) (*Class, bool) {
-	sym := s.entry.exports[name]
-	if sym == nil || sym.kind != symClass || sym.class.native {
-		return nil, false
-	}
-	return &Class{info: sym.class, script: s}, true
-}
-
-func (c *Class) Name() string { return c.info.name }
-
-// Satisfies says why the class doesn't satisfy i, or "" when it does.
-func (c *Class) Satisfies(i *Interface) string { return c.info.satisfies(i.info) }
-
-// ConstructorParams is how many arguments the class's constructor takes.
-func (c *Class) ConstructorParams() int { return len(c.info.ctor.params) }
-
-// Call calls a function the entry module exports, with data for the host's native functions.
-func (s *Script) Call(name string, data any, args ...Value) (Value, error) {
-	sym := s.entry.exports[name]
-	if sym == nil || sym.kind != symFunc {
-		return Value{}, fmt.Errorf("%s exports no function %s", s.entry.id, name)
-	}
-	if len(args) != len(sym.fn.params) {
-		return Value{}, fmt.Errorf("%s takes %s", name, plural(len(sym.fn.params)))
-	}
-	v := &vm{limits: s.limits, data: data}
-	return v.call(sym.fn, Value{}, args, sym.fn.mod, sym.fn.pos)
-}
-
-// Instance is an object of a script's class that the host keeps and calls into. It isn't safe for concurrent
-// use.
-type Instance struct {
-	script *Script
-	class  *classInfo
-	obj    Value
-	data   any
-	// allocated counts the bytes calls allocated since the instance's memory was last measured
-	allocated int
-}
-
-// New makes an object of c with its constructor, which must take no arguments. data is what the host's native
-// functions get (Call.Data) whenever this instance calls them.
-func (s *Script) New(c *Class, data any) (*Instance, error) {
-	in := &Instance{script: s, class: c.info, data: data}
-	if len(c.info.ctor.params) != 0 {
-		return nil, fmt.Errorf("%s's constructor takes arguments", c.info.name)
-	}
-	_, err := in.run(func(v *vm) (Value, error) {
-		obj, err := v.newObject(c.info, c.info.mod, c.info.pos)
-		if err != nil {
-			return Value{}, err
+	fail := func(err error) (*Script, []Diagnostic) {
+		var se *ScriptError
+		if errors.As(err, &se) {
+			return nil, []Diagnostic{{Module: se.Module, Line: se.Line, Col: se.Col, Msg: se.Msg}}
 		}
-		in.obj = obj
-		_, err = v.call(c.info.ctor, obj, nil, c.info.mod, c.info.pos)
-		return Value{}, err
-	})
+		return nil, []Diagnostic{{Module: entry, Line: 1, Col: 1, Msg: err.Error()}}
+	}
+	bin, _, err := c.generate(c.modules[entry])
 	if err != nil {
-		return nil, err
+		return fail(fmt.Errorf("the compiler failed: %w", err))
 	}
-	return in, nil
-}
-
-// run runs fn as one call from the host, with fresh budgets, and checks the instance's memory afterwards.
-func (in *Instance) run(fn func(v *vm) (Value, error)) (Value, error) {
-	v := &vm{limits: in.script.limits, data: in.data}
-	out, err := fn(v)
+	s, err := readScript(bin, ScriptOptions{Hosts: opts.Hosts, Limits: c.limits})
 	if err != nil {
-		return Value{}, err
+		return fail(err)
 	}
-	in.allocated += v.allocated
-	if in.allocated > in.script.limits.MaxHeap/2 {
-		in.allocated = 0
-		if heapSize(in.obj, in.script.limits.MaxHeap) > in.script.limits.MaxHeap {
-			m := in.class.mod
-			return Value{}, m.errAt(in.class.pos, "%s keeps more than %d bytes of memory", in.class.name, in.script.limits.MaxHeap)
-		}
+	if err := s.checkConsts(); err != nil {
+		return fail(err)
 	}
-	return out, nil
-}
-
-// HasMethod reports whether the instance's class has a public method name.
-func (in *Instance) HasMethod(name string) bool {
-	m := in.class.methods[name]
-	return m != nil && !m.private
-}
-
-// Call calls the instance's public method name with args, which must have the method's parameter types.
-func (in *Instance) Call(method string, args ...Value) (Value, error) {
-	f := in.class.methods[method]
-	if f == nil || f.private {
-		return Value{}, fmt.Errorf("%s has no method %s", in.class.name, method)
-	}
-	if len(args) != len(f.params) {
-		return Value{}, fmt.Errorf("%s.%s takes %s", in.class.name, method, plural(len(f.params)))
-	}
-	for i, a := range args {
-		if !fits(a, f.params[i]) {
-			return Value{}, fmt.Errorf("%s.%s wants a %s, not a %s", in.class.name, method, f.params[i], a.Kind())
-		}
-	}
-	return in.run(func(v *vm) (Value, error) { return v.call(f, in.obj, args, f.mod, f.pos) })
-}
-
-// FieldKind is the kind of the instance's public field name, when it is a number, a string or a bool, so a host
-// can set it from text.
-func (in *Instance) FieldKind(name string) (Kind, bool) {
-	f := in.class.fieldByName[name]
-	if f == nil || f.private || !f.typ.primitive() {
-		return 0, false
-	}
-	return f.typ.valueKind(), true
-}
-
-// Set sets the instance's public field name (a number, string or bool field, readonly ones included) to v.
-func (in *Instance) Set(name string, v Value) error {
-	kind, ok := in.FieldKind(name)
-	if !ok {
-		return fmt.Errorf("%s has no field %s of a number, string or bool", in.class.name, name)
-	}
-	if v.kind != kind {
-		return fmt.Errorf("%s.%s is a %s, not a %s", in.class.name, name, kind, v.Kind())
-	}
-	o := in.obj.ref.(*object)
-	o.fields[in.class.fieldByName[name].slot] = v
-	return nil
-}
-
-// Get reads the instance's field name (tests and tools use it).
-func (in *Instance) Get(name string) (Value, bool) {
-	f := in.class.fieldByName[name]
-	if f == nil || f.getter != nil {
-		return Value{}, false
-	}
-	return in.obj.ref.(*object).fields[f.slot], true
+	return s, nil
 }
 
 // HostModule is a module the host offers scripts, imported by its name (such as "game"). Its Source is a definition
@@ -318,10 +170,10 @@ type HostModule struct {
 type NativeFunc func(c *Call, this Value, args []Value) (Value, error)
 
 // Call is what a native function knows about the call it serves.
-type Call struct{ vm *vm }
+type Call struct{ data any }
 
 // Data is what the host gave the Instance (Script.New) or Script.Call this call came from.
-func (c *Call) Data() any { return c.vm.data }
+func (c *Call) Data() any { return c.data }
 
 // module checks the host module once.
 func (h *HostModule) module() (*moduleInfo, []Diagnostic) {

@@ -33,7 +33,7 @@ type fixture struct {
 	t       *testing.T
 	url     string
 	tokens  *auth.TokenManager
-	library *scripting.Library
+	library *scripting.SourceLibrary
 	src     scripting.Static
 	revoked atomic.Bool
 }
@@ -41,7 +41,7 @@ type fixture struct {
 func newFixture(t *testing.T) *fixture {
 	f := &fixture{t: t, tokens: auth.NewTokenManager("secret", time.Hour),
 		src: scripting.Static{"script/util": utilScript, "script/greeter": greeterScript}}
-	f.library = scripting.NewLibrary(f.src, nil)
+	f.library = scripting.NewSourceLibrary(f.src, nil)
 	if err := f.library.Refresh(context.Background()); err != nil {
 		t.Fatal(err)
 	}

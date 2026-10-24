@@ -18,9 +18,9 @@ import (
 
 // Run serves the language server on /lsp until ctx is cancelled. Compose starts it in build mode only.
 func Run(ctx context.Context, cfg *config.LSPConfig) error {
-	library := scripting.FollowAssets(ctx, cfg.AssetsURL)
+	library := scripting.FollowAssetSources(ctx, cfg.AssetsURL)
 	if library == nil {
-		library = scripting.NewLibrary(scripting.Static{}, nil) // no asset service: only open documents
+		library = scripting.NewSourceLibrary(scripting.Static{}, nil) // no asset service: only open documents
 	}
 	revocations := auth.NewRevocations()
 	if cfg.WorldGRPCAddr != "" {

@@ -5,7 +5,7 @@ import (
 	"strings"
 )
 
-// checker loads a script's modules and checks them, turning each into closures (interp.go).
+// checker loads a script's modules and checks them, turning each function into IR (ir.go).
 type checker struct {
 	limits  ScriptLimits
 	hosts   map[string]*HostModule
@@ -50,7 +50,7 @@ type constInfo struct {
 	decl *constDecl
 	typ  *Type
 	slot int
-	init evalFn
+	init irExpr
 	mod  *moduleInfo
 }
 
@@ -186,9 +186,6 @@ func (c *checker) checkModule(m *moduleInfo) {
 	}
 	if c.rec != nil {
 		c.recordDecls(m)
-	}
-	if len(c.diags) == 0 {
-		c.evalConsts(m)
 	}
 }
 
@@ -652,28 +649,6 @@ func (c *checker) checkConst(k *constInfo) {
 	k.typ, k.init = t, init
 }
 
-// evalConsts computes m's constants in order, each once.
-func (c *checker) evalConsts(m *moduleInfo) {
-	m.globals = make([]Value, len(m.consts))
-	for i, k := range m.consts {
-		m.globals[i] = zeroOf(k.typ)
-	}
-	fr := &frame{vm: &vm{limits: c.limits}}
-	for _, k := range m.consts {
-		v, err := k.init(fr)
-		if err != nil {
-			var se *ScriptError
-			if errors.As(err, &se) {
-				c.diags = append(c.diags, Diagnostic{Module: se.Module, Line: se.Line, Col: se.Col, Msg: se.Msg})
-			} else {
-				c.errorf(m, k.decl.pos, "%v", err)
-			}
-			continue
-		}
-		m.globals[k.slot] = v
-	}
-}
-
 // compileFunc checks a function's or method's body.
 func (c *checker) compileFunc(fn *funcInfo, d *funcDecl, class *classInfo) {
 	fc := c.newFuncCtx(fn.mod, class, fn)
@@ -685,7 +660,7 @@ func (c *checker) compileFunc(fn *funcInfo, d *funcDecl, class *classInfo) {
 	if fn.result.kind != tVoid && !done {
 		c.errorf(fn.mod, d.pos, "%s doesn't return a value on every path", fn.name)
 	}
-	fn.body, fn.nlocals = body, fc.maxLocals
+	fn.body, fn.locals = body, fc.slots
 }
 
 // compileClass checks a class's field values, methods and constructor, and the interfaces it implements.
@@ -699,7 +674,6 @@ func (c *checker) compileClass(ci *classInfo) {
 	if ci.native {
 		return
 	}
-	var inits []*fieldInfo
 	for _, f := range ci.fields {
 		if f.owner != ci || f.decl.init == nil {
 			continue
@@ -711,18 +685,6 @@ func (c *checker) compileClass(ci *classInfo) {
 			c.errorf(m, f.decl.init.position(), "%s is a %s, not a %s", f.name, t, f.typ)
 		}
 		f.init = init
-		inits = append(inits, f)
-	}
-	runInits := func(fr *frame) error {
-		o := fr.this.ref.(*object)
-		for _, f := range inits {
-			v, err := f.init(fr)
-			if err != nil {
-				return err
-			}
-			o.fields[f.slot] = v
-		}
-		return nil
 	}
 	for _, md := range d.methods {
 		if fn := ci.methods[md.name]; fn != nil && fn.owner == ci {
@@ -730,18 +692,20 @@ func (c *checker) compileClass(ci *classInfo) {
 		}
 	}
 	ctor := ci.ctor
+	inits := &irFieldInits{class: ci}
 	if ctor.decl == nil {
 		// The implicit constructor passes its arguments to the base class's, then sets the fields' values.
-		super := ci.super
-		ctor.nlocals = len(ctor.params)
-		ctor.body = func(fr *frame) (flow, error) {
-			if super != nil {
-				if _, err := fr.vm.call(super.ctor, fr.this, fr.locals[:len(super.ctor.params)], m, ci.pos); err != nil {
-					return flowNext, err
-				}
+		ctor.locals = append([]*Type(nil), ctor.params...)
+		body := &irBlock{}
+		if ci.super != nil {
+			args := make([]irExpr, len(ci.super.ctor.params))
+			for i, p := range ci.super.ctor.params {
+				args[i] = &irLocal{irBase{p}, i}
 			}
-			return flowNext, runInits(fr)
+			body.stmts = append(body.stmts, &irSuperCall{ctor: ci.super.ctor, args: args, pos: ci.pos})
 		}
+		body.stmts = append(body.stmts, inits)
+		ctor.body = body
 		return
 	}
 	fc := c.newFuncCtx(m, ci, ctor)
@@ -751,28 +715,19 @@ func (c *checker) compileClass(ci *classInfo) {
 		fc.declareParam(p.name, ctor.params[i], p.pos)
 	}
 	stmts := ctor.decl.body.stmts
-	var superCall execFn
+	body := &irBlock{}
 	if ci.super != nil {
 		if len(stmts) == 0 || !isSuperCall(stmts[0]) {
 			c.errorf(m, ctor.pos, "the constructor of %s must call super(…) first", ci.name)
 		} else {
-			superCall = fc.superCall(stmts[0].(*exprStmt).x.(*superCallNode))
+			body.stmts = append(body.stmts, fc.superCall(stmts[0].(*exprStmt).x.(*superCallNode)))
 			stmts = stmts[1:]
 		}
 	}
+	body.stmts = append(body.stmts, inits)
 	rest, _ := fc.stmts(stmts)
-	ctor.nlocals = fc.maxLocals
-	ctor.body = func(fr *frame) (flow, error) {
-		if superCall != nil {
-			if _, err := superCall(fr); err != nil {
-				return flowNext, err
-			}
-		}
-		if err := runInits(fr); err != nil {
-			return flowNext, err
-		}
-		return rest(fr)
-	}
+	body.stmts = append(body.stmts, rest)
+	ctor.body, ctor.locals = body, fc.slots
 }
 
 func isSuperCall(s stmt) bool {

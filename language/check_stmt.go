@@ -1,58 +1,41 @@
 package language
 
 // stmts checks statements in the current scope. It returns their code, and whether they always return.
-func (fc *funcCtx) stmts(list []stmt) (execFn, bool) {
-	code := make([]execFn, 0, len(list))
+func (fc *funcCtx) stmts(list []stmt) (*irBlock, bool) {
+	block := &irBlock{stmts: make([]irStmt, 0, len(list))}
 	returns := false
 	for _, s := range list {
-		fn, r := fc.stmt(s)
-		code = append(code, fn)
+		code, r := fc.stmt(s)
+		block.stmts = append(block.stmts, code)
 		returns = returns || r
 	}
-	return func(fr *frame) (flow, error) {
-		for _, fn := range code {
-			if f, err := fn(fr); err != nil || f != flowNext {
-				return f, err
-			}
-		}
-		return flowNext, nil
-	}, returns
+	return block, returns
 }
 
-func (fc *funcCtx) block(b *blockStmt) (execFn, bool) {
+func (fc *funcCtx) block(b *blockStmt) (*irBlock, bool) {
 	fc.push()
 	defer fc.pop()
 	return fc.stmts(b.stmts)
 }
 
-// stepped charges a statement against the step budget before running it.
-func (fc *funcCtx) stepped(pos int, fn execFn) execFn {
-	m := fc.m
-	return func(fr *frame) (flow, error) {
-		if err := fr.vm.step(m, pos); err != nil {
-			return flowNext, err
-		}
-		return fn(fr)
-	}
-}
-
-func (fc *funcCtx) cond(n node) evalFn {
-	fn, t := fc.expr(n, nil)
+func (fc *funcCtx) cond(n node) irExpr {
+	e, t := fc.expr(n, nil)
 	if t.kind != tBool && t.kind != tInvalid {
 		fc.errorf(n.position(), "a condition is a bool, not a %s", t)
 	}
-	return fn
+	return e
 }
 
-func (fc *funcCtx) stmt(s stmt) (execFn, bool) {
-	m := fc.m
+// stmt checks a statement. Every statement but blocks, loops, break and continue counts one step against the
+// budget where it starts; loops count one for every turn.
+func (fc *funcCtx) stmt(s stmt) (irStmt, bool) {
 	switch s := s.(type) {
 	case *blockStmt:
 		return fc.block(s)
 	case *letStmt:
-		return fc.stepped(s.pos, fc.let(s)), false
+		return fc.let(s), false
 	case *assignStmt:
-		return fc.stepped(s.pos, fc.assign(s)), false
+		return fc.assign(s), false
 	case *exprStmt:
 		switch s.x.(type) {
 		case *callNode, *methodCallNode, *superMethodNode, *newNode:
@@ -62,55 +45,39 @@ func (fc *funcCtx) stmt(s stmt) (execFn, bool) {
 			fc.errorf(s.pos, "this does nothing: assign its value, or call something")
 		}
 		x, _ := fc.expr(s.x, nil)
-		return fc.stepped(s.pos, func(fr *frame) (flow, error) {
-			_, err := x(fr)
-			return flowNext, err
-		}), false
+		return &irExprStmt{x: x, pos: s.pos}, false
 	case *ifStmt:
 		cond := fc.cond(s.cond)
 		then, thenReturns := fc.block(s.then)
-		var els execFn
+		var els irStmt
 		elsReturns := false
 		if s.els != nil {
 			els, elsReturns = fc.stmt(s.els)
 		}
-		return fc.stepped(s.pos, func(fr *frame) (flow, error) {
-			c, err := cond(fr)
-			if err != nil {
-				return flowNext, err
-			}
-			if c.b {
-				return then(fr)
-			}
-			if els != nil {
-				return els(fr)
-			}
-			return flowNext, nil
-		}), thenReturns && elsReturns
+		return &irIf{cond: cond, then: then, els: els, pos: s.pos}, thenReturns && elsReturns
 	case *whileStmt:
 		cond := fc.cond(s.cond)
 		fc.loops++
 		body, _ := fc.block(s.body)
 		fc.loops--
-		return fc.loop(s.pos, nil, cond, nil, body), false
+		return &irLoop{cond: cond, body: body, pos: s.pos}, false
 	case *forStmt:
 		fc.push()
 		defer fc.pop()
-		var init, step execFn
+		loop := &irLoop{pos: s.pos}
 		if s.init != nil {
-			init, _ = fc.stmt(s.init)
+			loop.init, _ = fc.stmt(s.init)
 		}
-		var cond evalFn
 		if s.cond != nil {
-			cond = fc.cond(s.cond)
+			loop.cond = fc.cond(s.cond)
 		}
 		if s.step != nil {
-			step, _ = fc.stmt(s.step)
+			loop.step, _ = fc.stmt(s.step)
 		}
 		fc.loops++
-		body, _ := fc.block(s.body)
+		loop.body, _ = fc.block(s.body)
 		fc.loops--
-		return fc.loop(s.pos, init, cond, step, body), false
+		return loop, false
 	case *forOfStmt:
 		iter, it := fc.expr(s.iter, nil)
 		elem := typInvalid
@@ -129,93 +96,28 @@ func (fc *funcCtx) stmt(s stmt) (execFn, bool) {
 		fc.loops++
 		body, _ := fc.block(s.body)
 		fc.loops--
-		pos := s.pos
-		return func(fr *frame) (flow, error) {
-			if err := fr.vm.step(m, pos); err != nil {
-				return flowNext, err
-			}
-			v, err := iter(fr)
-			if err != nil {
-				return flowNext, err
-			}
-			if v.kind != Array {
-				return flowNext, nil // a null array is empty
-			}
-			for _, item := range v.ref.(*arrayVal).items {
-				if err := fr.vm.step(m, pos); err != nil {
-					return flowNext, err
-				}
-				fr.locals[slot] = item
-				f, err := body(fr)
-				if err != nil || f == flowReturn {
-					return f, err
-				}
-				if f == flowBreak {
-					break
-				}
-			}
-			return flowNext, nil
-		}, false
+		return &irForOf{slot: slot, elem: elem, iter: iter, body: body, pos: s.pos}, false
 	case *breakStmt, *continueStmt:
-		f := flowBreak
-		if _, ok := s.(*continueStmt); ok {
-			f = flowContinue
-		}
 		if fc.loops == 0 {
 			fc.errorf(s.stmtPos(), "break and continue are only in loops")
 		}
-		return func(*frame) (flow, error) { return f, nil }, false
+		if _, ok := s.(*continueStmt); ok {
+			return &irContinue{}, false
+		}
+		return &irBreak{}, false
 	case *returnStmt:
-		return fc.stepped(s.pos, fc.ret(s)), true
+		return fc.ret(s), true
 	}
 	fc.errorf(s.stmtPos(), "unexpected statement")
-	return func(*frame) (flow, error) { return flowNext, nil }, false
+	return &irNop{}, false
 }
 
-// loop runs init, then body while cond holds (always without one), with step after each turn.
-func (fc *funcCtx) loop(pos int, init execFn, cond evalFn, step, body execFn) execFn {
-	m := fc.m
-	return func(fr *frame) (flow, error) {
-		if init != nil {
-			if _, err := init(fr); err != nil {
-				return flowNext, err
-			}
-		}
-		for {
-			if err := fr.vm.step(m, pos); err != nil {
-				return flowNext, err
-			}
-			if cond != nil {
-				c, err := cond(fr)
-				if err != nil {
-					return flowNext, err
-				}
-				if !c.b {
-					return flowNext, nil
-				}
-			}
-			f, err := body(fr)
-			if err != nil || f == flowReturn {
-				return f, err
-			}
-			if f == flowBreak {
-				return flowNext, nil
-			}
-			if step != nil {
-				if _, err := step(fr); err != nil {
-					return flowNext, err
-				}
-			}
-		}
-	}
-}
-
-func (fc *funcCtx) let(s *letStmt) execFn {
+func (fc *funcCtx) let(s *letStmt) irStmt {
 	var want *Type
 	if s.typ != nil {
 		want = fc.c.resolveType(fc.m, s.typ)
 	}
-	var init evalFn
+	var init irExpr
 	t := want
 	if s.init != nil {
 		var it *Type
@@ -237,34 +139,20 @@ func (fc *funcCtx) let(s *letStmt) execFn {
 		}
 	}
 	slot := fc.declare(s.name, t, s.constant, s.pos).slot
-	if init == nil {
-		zero := zeroOf(t)
-		return func(fr *frame) (flow, error) {
-			fr.locals[slot] = zero
-			return flowNext, nil
-		}
-	}
-	return func(fr *frame) (flow, error) {
-		v, err := init(fr)
-		if err != nil {
-			return flowNext, err
-		}
-		fr.locals[slot] = v
-		return flowNext, nil
-	}
+	return &irLet{slot: slot, t: t, init: init, pos: s.pos}
 }
 
-func (fc *funcCtx) ret(s *returnStmt) execFn {
+func (fc *funcCtx) ret(s *returnStmt) irStmt {
 	if fc.fn == nil {
 		fc.errorf(s.pos, "return is only in functions")
-		return func(*frame) (flow, error) { return flowReturn, nil }
+		return &irReturn{pos: s.pos}
 	}
 	result := fc.fn.result
 	if s.value == nil {
 		if result.kind != tVoid {
 			fc.errorf(s.pos, "%s returns a %s", fc.fn.name, result)
 		}
-		return func(*frame) (flow, error) { return flowReturn, nil }
+		return &irReturn{pos: s.pos}
 	}
 	if result.kind == tVoid {
 		fc.errorf(s.value.position(), "%s returns nothing; give it a result type to return a value", fc.fn.name)
@@ -277,127 +165,98 @@ func (fc *funcCtx) ret(s *returnStmt) execFn {
 	if want != nil && !assignable(t, want) {
 		fc.errorf(s.value.position(), "%s returns a %s, not a %s", fc.fn.name, result, t)
 	}
-	return func(fr *frame) (flow, error) {
-		out, err := v(fr)
-		if err != nil {
-			return flowNext, err
-		}
-		fr.ret = out
-		return flowReturn, nil
+	if want == nil {
+		return &irReturn{pos: s.pos}
 	}
+	return &irReturn{value: v, pos: s.pos}
 }
 
-// update computes a target's new value from its current one.
-type update func(fr *frame, cur Value) (Value, error)
-
-func (fc *funcCtx) assign(s *assignStmt) execFn {
-	t, apply := fc.target(s.target)
-	if apply == nil {
+func (fc *funcCtx) assign(s *assignStmt) irStmt {
+	target := fc.target(s.target)
+	if target == nil {
 		if s.value != nil {
 			fc.expr(s.value, nil)
 		}
-		return func(*frame) (flow, error) { return flowNext, nil }
+		return &irNop{}
 	}
-	m, pos := fc.m, s.pos
-	var up update
+	t, pos := target.t, s.pos
+	out := &irAssign{target: target, pos: pos}
 	switch s.op {
 	case "=":
 		v, vt := fc.expr(s.value, t)
 		if !assignable(vt, t) {
 			fc.errorf(s.value.position(), "that is a %s, not a %s", vt, t)
 		}
-		up = func(fr *frame, _ Value) (Value, error) { return v(fr) }
+		out.op, out.value = '=', v
 	case "++", "--":
 		if t.kind != tNumber && t.kind != tInvalid {
 			fc.errorf(pos, "%s wants a number, not a %s", s.op, t)
 		}
-		op := s.op[:1]
-		up = func(_ *frame, cur Value) (Value, error) {
-			f, msg := arith(op, cur.num, 1)
-			if msg != "" {
-				return Value{}, m.errAt(pos, "%s", msg)
-			}
-			return Num(f), nil
+		out.op = 'i'
+		if s.op == "--" {
+			out.op = 'd'
 		}
 	default:
 		v, vt := fc.expr(s.value, nil)
-		op, rt := fc.binaryOp(s.op[:1], t, vt, pos)
-		if op == nil {
-			break
+		op, rt := fc.binaryOp(s.op[:1], &irBad{}, v, t, vt, pos)
+		if op == bad {
+			return &irNop{}
 		}
 		if !identical(rt, t) {
 			fc.errorf(pos, "%s gives a %s, which doesn't go in a %s", s.op, rt, t)
 		}
-		up = func(fr *frame, cur Value) (Value, error) {
-			r, err := v(fr)
-			if err != nil {
-				return Value{}, err
-			}
-			return op(fr, cur, r)
-		}
+		out.op, out.value = s.op[0], v
 	}
-	if up == nil {
-		return func(*frame) (flow, error) { return flowNext, nil }
-	}
-	return func(fr *frame) (flow, error) { return flowNext, apply(fr, up) }
+	return out
 }
 
-// target checks the left side of an assignment: a variable, a field or an array element. apply runs the
-// update on it, evaluating the object or array and the index once.
-func (fc *funcCtx) target(n node) (*Type, func(fr *frame, up update) error) {
-	m := fc.m
+// target checks the left side of an assignment: a variable, a field or an array element. It is nil when it
+// failed (and said why).
+func (fc *funcCtx) target(n node) *irTarget {
 	switch n := n.(type) {
 	case *nameNode:
 		if fc.probing(n.name) {
 			fc.c.rec.probe.names(fc)
-			return typInvalid, nil
+			return nil
 		}
 		l := fc.lookup(n.name)
 		if l == nil {
 			if sym := fc.m.symbols[n.name]; sym != nil && sym.kind == symInvalid {
-				return typInvalid, nil
+				return nil
 			}
 			if sym := fc.m.symbols[n.name]; sym != nil && sym.kind == symConst {
 				fc.errorf(n.pos, "%s is a constant", n.name)
 			} else {
 				fc.errorf(n.pos, "unknown variable %s", n.name)
 			}
-			return typInvalid, nil
+			return nil
 		}
 		if l.constant {
 			fc.errorf(n.pos, "%s is a constant", n.name)
 		}
 		fc.record(n.pos, n.name, localRef(l, n.name, fc.m, false))
-		slot := l.slot
-		return l.typ, func(fr *frame, up update) error {
-			v, err := up(fr, fr.locals[slot])
-			if err != nil {
-				return err
-			}
-			fr.locals[slot] = v
-			return nil
-		}
+		return &irTarget{kind: targetLocal, t: l.typ, slot: l.slot, pos: n.pos}
 	case *memberNode:
 		x, xt := fc.expr(n.x, nil)
 		if fc.probing(n.name) {
 			fc.c.rec.probe.members(fc, xt)
-			return typInvalid, nil
+			return nil
 		}
 		var f *fieldInfo
 		switch xt.kind {
 		case tInvalid:
-			return typInvalid, nil
+			return nil
 		case tClass:
 			f = xt.class.fieldByName[n.name]
 		case tIface:
 			f = xt.iface.fields[n.name]
 		case tArray, tString, tMap:
 			fc.errorf(n.pos, "%s can't be set", n.name)
-			return typInvalid, nil
+			return nil
 		}
 		if f == nil {
 			fc.errorf(n.pos, "%s has no field %s", xt, n.name)
-			return typInvalid, nil
+			return nil
 		}
 		if xt.kind == tClass && !fc.canSee(f.owner, f.private) {
 			fc.errorf(n.pos, "%s is private to %s", n.name, f.owner.name)
@@ -413,67 +272,29 @@ func (fc *funcCtx) target(n node) (*Type, func(fr *frame, up update) error) {
 				fc.errorf(n.pos, "%s is readonly: only its class's constructor sets it", n.name)
 			}
 		}
-		name, pos, static := n.name, n.pos, f
-		byName := xt.kind == tIface
-		return f.typ, func(fr *frame, up update) error {
-			o, err := receiver(fr, x, m, pos, name)
-			if err != nil {
-				return err
-			}
-			f := static
-			if byName {
-				f = o.class.fieldByName[name]
-			}
-			if f.getter != nil {
-				return m.errAt(pos, "%s is the host's, and can't be set", name)
-			}
-			v, err := up(fr, o.fields[f.slot])
-			if err != nil {
-				return err
-			}
-			o.fields[f.slot] = v
-			return nil
+		if xt.kind == tIface {
+			return &irTarget{kind: targetIfaceField, t: f.typ, x: x, name: n.name, pos: n.pos}
 		}
+		return &irTarget{kind: targetField, t: f.typ, x: x, f: f, name: n.name, pos: n.pos}
 	case *indexNode:
 		x, xt := fc.expr(n.x, nil)
 		i, it := fc.expr(n.i, nil)
 		switch xt.kind {
 		case tInvalid:
-			return typInvalid, nil
+			return nil
 		case tArray:
 		case tMap:
 			fc.errorf(n.pos, "set a map's entries with set(key, value), not [ ]")
-			return typInvalid, nil
+			return nil
 		default:
 			fc.errorf(n.pos, "only arrays have elements, not a %s", xt)
-			return typInvalid, nil
+			return nil
 		}
 		if it.kind != tNumber && it.kind != tInvalid {
 			fc.errorf(n.i.position(), "an index is a number, not a %s", it)
 		}
-		pos := n.pos
-		return xt.elem, func(fr *frame, up update) error {
-			a, err := x(fr)
-			if err != nil {
-				return err
-			}
-			items, idx, err := index(fr, constant(a), i, m, pos)
-			if err != nil {
-				return err
-			}
-			v, err := up(fr, items[idx])
-			if err != nil {
-				return err
-			}
-			// The value may have grown or shrunk the array: set the element of the array as it is now
-			items = a.ref.(*arrayVal).items
-			if idx >= len(items) {
-				return m.errAt(pos, "index %d is out of range (length %d)", idx, len(items))
-			}
-			items[idx] = v
-			return nil
-		}
+		return &irTarget{kind: targetIndex, t: xt.elem, x: x, i: i, pos: n.pos}
 	}
 	fc.errorf(n.position(), "only variables, fields and array elements can be set")
-	return typInvalid, nil
+	return nil
 }
