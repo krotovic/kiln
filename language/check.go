@@ -12,6 +12,7 @@ type checker struct {
 	modules map[string]*moduleInfo
 	order   []*moduleInfo // dependencies first
 	diags   []Diagnostic
+	rec     *recorder // what Analyze records; nil for CompileScript
 }
 
 type symKind uint8
@@ -22,6 +23,7 @@ const (
 	symAlias
 	symFunc
 	symConst
+	symInvalid // imported from a module that failed to load: anything goes, silently
 )
 
 // symbol is a name declared at the top of a module, or imported into it.
@@ -182,18 +184,69 @@ func (c *checker) checkModule(m *moduleInfo) {
 			c.compileClass(d.sym.class)
 		}
 	}
+	if c.rec != nil {
+		c.recordDecls(m)
+	}
 	if len(c.diags) == 0 {
 		c.evalConsts(m)
+	}
+}
+
+// recordDecls records where m's declarations and their members are declared, once they are resolved.
+func (c *checker) recordDecls(m *moduleInfo) {
+	for _, d := range m.ast.decls {
+		if d.sym == nil {
+			continue
+		}
+		name, pos := d.name()
+		c.rec.add(m, pos, name, c.symbolRef(d.sym, true, nil))
+		switch {
+		case d.class != nil:
+			ci := d.sym.class
+			for _, f := range d.class.fields {
+				if fi := ci.fieldByName[f.name]; fi != nil && fi.owner == ci {
+					c.rec.add(m, f.pos, f.name, fieldRef(ci.name, fi, true))
+				}
+			}
+			for _, md := range d.class.methods {
+				if fn := ci.methods[md.name]; fn != nil && fn.owner == ci {
+					c.rec.add(m, md.pos, md.name, methodRef(ci.name, fn, true))
+				}
+			}
+		case d.iface != nil:
+			ii := d.sym.iface
+			for _, f := range d.iface.fields {
+				if fi := ii.fields[f.name]; fi != nil {
+					c.rec.add(m, f.pos, f.name, fieldRef(ii.name, fi, true))
+				}
+			}
+			for _, md := range d.iface.methods {
+				if fn := ii.methods[md.name]; fn != nil {
+					c.rec.add(m, md.pos, md.name, methodRef(ii.name, fn, true))
+				}
+			}
+		}
 	}
 }
 
 func (c *checker) bindImports(m *moduleInfo) {
 	for _, imp := range m.ast.imports {
 		target := c.modules[imp.from]
-		if target == nil {
-			continue // its loading failed, and said why
+		if c.rec != nil {
+			ref := Ref{Kind: RefModule, Detail: "module \"" + imp.from + "\""}
+			if target != nil {
+				ref.Def = &Location{Module: imp.from}
+			}
+			c.rec.add(m, imp.fromPos, `"`+imp.from+`"`, ref)
 		}
 		for _, n := range imp.names {
+			if target == nil {
+				// Its loading failed, and said why; its names go unchecked rather than unknown
+				if _, dup := m.symbols[n.alias]; !dup {
+					m.symbols[n.alias] = &symbol{kind: symInvalid, name: n.alias, mod: m, pos: n.pos}
+				}
+				continue
+			}
 			sym := target.exports[n.name]
 			if sym == nil {
 				c.errorf(m, n.pos, "%s doesn't export %s", imp.from, n.name)
@@ -204,6 +257,20 @@ func (c *checker) bindImports(m *moduleInfo) {
 				continue
 			}
 			m.symbols[n.alias] = sym
+			if n.alias != sym.name || n.namePos != n.pos {
+				if m.aliases == nil {
+					m.aliases = map[string]Location{}
+				}
+				m.aliases[n.alias] = Location{Module: m.id, Start: n.pos, End: n.pos + len(n.alias)}
+			}
+			if c.rec != nil {
+				if n.namePos >= 0 {
+					c.rec.add(m, n.namePos, n.name, c.symbolRef(sym, false, nil))
+				}
+				if n.namePos != n.pos {
+					c.rec.add(m, n.pos, n.alias, c.symbolRef(sym, true, aliasLoc(m, sym, n.alias)))
+				}
+			}
 		}
 	}
 }
@@ -268,6 +335,10 @@ func (c *checker) native(m *moduleInfo, name string, pos int) NativeFunc {
 
 // resolveType turns a written type into a Type, in the module it was written in.
 func (c *checker) resolveType(m *moduleInfo, te *typeExpr) *Type {
+	if c.rec != nil && c.rec.probe != nil && te.name == probeName {
+		c.rec.probe.types(m)
+		return typInvalid
+	}
 	var t *Type
 	switch te.name {
 	case "number":
@@ -302,6 +373,8 @@ func (c *checker) resolveType(m *moduleInfo, te *typeExpr) *Type {
 		case sym == nil:
 			c.errorf(m, te.pos, "unknown type %s", te.name)
 			return typInvalid
+		case sym.kind == symInvalid:
+			return typInvalid
 		case sym.kind == symClass:
 			t = sym.class.typ
 		case sym.kind == symIface:
@@ -311,6 +384,9 @@ func (c *checker) resolveType(m *moduleInfo, te *typeExpr) *Type {
 		default:
 			c.errorf(m, te.pos, "%s is not a type", te.name)
 			return typInvalid
+		}
+		if c.rec != nil {
+			c.rec.add(m, te.pos, te.name, c.symbolRef(sym, false, aliasLoc(m, sym, te.name)))
 		}
 	}
 	if len(te.args) > 0 && te.name != "Map" && te.name != "Array" {
@@ -399,6 +475,7 @@ func (c *checker) resolveIface(ii *ifaceInfo) {
 			continue
 		}
 		c.resolveIface(t.iface)
+		ii.bases = append(ii.bases, t.iface)
 		for _, name := range t.iface.order {
 			add(name, e.pos, t.iface.fields[name], t.iface.methods[name])
 		}
@@ -409,7 +486,7 @@ func (c *checker) resolveIface(ii *ifaceInfo) {
 			c.errorf(m, f.pos, "%s is declared twice", f.name)
 		}
 		own[f.name] = true
-		add(f.name, f.pos, &fieldInfo{name: f.name, pos: f.pos, typ: c.resolveType(m, f.typ), readonly: f.readonly}, nil)
+		add(f.name, f.pos, &fieldInfo{name: f.name, pos: f.pos, typ: c.resolveType(m, f.typ), readonly: f.readonly, decl: f, mod: m}, nil)
 	}
 	for _, d := range ii.decl.methods {
 		if own[d.name] {
@@ -465,7 +542,7 @@ func (c *checker) resolveClass(ci *classInfo) {
 			continue
 		}
 		fi := &fieldInfo{name: f.name, pos: f.pos, slot: len(ci.fields), owner: ci, private: f.private,
-			readonly: f.readonly || ci.native, decl: f}
+			readonly: f.readonly || ci.native, decl: f, mod: m}
 		switch {
 		case f.typ != nil:
 			fi.typ = c.resolveType(m, f.typ)
@@ -602,7 +679,7 @@ func (c *checker) compileFunc(fn *funcInfo, d *funcDecl, class *classInfo) {
 	fc := c.newFuncCtx(fn.mod, class, fn)
 	fc.push()
 	for i, p := range d.params {
-		fc.declare(p.name, fn.params[i], false, p.pos)
+		fc.declareParam(p.name, fn.params[i], p.pos)
 	}
 	body, done := fc.stmts(d.body.stmts)
 	if fn.result.kind != tVoid && !done {
@@ -671,7 +748,7 @@ func (c *checker) compileClass(ci *classInfo) {
 	fc.ctor = true
 	fc.push()
 	for i, p := range ctor.decl.params {
-		fc.declare(p.name, ctor.params[i], false, p.pos)
+		fc.declareParam(p.name, ctor.params[i], p.pos)
 	}
 	stmts := ctor.decl.body.stmts
 	var superCall execFn

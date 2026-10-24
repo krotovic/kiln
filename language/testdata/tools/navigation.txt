@@ -1,0 +1,185 @@
+Hover, definitions, references and outlines. ‸ marks the cursor; see tools_test.go.
+
+=== hover on a method with its doc comment
+-- script/main --
+class Bag {
+  // Adds n of an item; returns how many there are now.
+  add(id: string, n: number): number { return n }
+}
+export function main(): number {
+  const b = new Bag()
+  return b.ad‸d("herb", 2)
+}
+-- hover --
+(method) Bag.add(id: string, n: number): number
+Adds n of an item; returns how many there are now.
+-- definition --
+script/main:3:3
+
+=== hover on a local and a parameter
+-- script/main --
+export function f(count: number): number {
+  let twice = count * 2
+  return tw‸ice
+}
+-- hover --
+let twice: number
+-- definition --
+script/main:2:7
+
+=== hover on a parameter
+-- script/main --
+export function f(count: number): number {
+  return cou‸nt
+}
+-- hover --
+(parameter) count: number
+
+=== a class's doc comment, block style
+-- script/main --
+/**
+ * A bell.
+ * It rings.
+ */
+export class Bell {}
+export function main(): Be‸ll { return new Bell() }
+-- hover --
+class Bell
+A bell.
+It rings.
+
+=== definitions cross modules
+-- script/util --
+export function shout(s: string): string { return s.toUpperCase() }
+-- script/main --
+import { shout } from "script/util"
+export function main(): string { return sh‸out("hi") }
+-- definition --
+script/util:1:17
+-- hover --
+function shout(s: string): string
+
+=== an import alias is declared where it is imported
+-- script/util --
+export const LIMIT = 3
+-- script/main --
+import { LIMIT as MAX } from "script/util"
+export function main(): number { return MA‸X }
+-- definition --
+script/main:1:19
+-- hover --
+const LIMIT: number
+
+=== the module name of an import leads to the module
+-- script/util --
+export const X = 1
+-- script/main --
+import { X } from "script/u‸til"
+-- definition --
+script/util:1:1
+
+=== the host's declarations are in its definition file
+-- script/main --
+import { probe } from "test"
+export function main(): string { return pro‸be("a").name }
+-- definition --
+test:3:24
+-- hover --
+function probe(name: string): Probe
+
+=== fields through an interface
+-- script/main --
+interface Named { readonly name: string }
+class Dog { name = "rex" }
+export function main(): string {
+  const n: Named = new Dog()
+  return n.na‸me
+}
+-- hover --
+(readonly field) Named.name: string
+-- definition --
+script/main:1:28
+
+=== references of a field across modules
+-- script/a --
+export class Box { size = 1 }
+-- script/main --
+import { Box } from "script/a"
+export function main(): number {
+  const b = new Box()
+  b.size = b.si‸ze + 1
+  return b.size
+}
+-- references --
+script/a:1:20
+script/main:4:5
+script/main:4:14
+script/main:5:12
+
+=== references of a class
+-- script/main --
+class Box {}
+function make(): Box { return new B‸ox() }
+export function main(): number { make(); return 1 }
+-- references --
+script/main:1:7
+script/main:2:18
+script/main:2:35
+
+=== the outline
+-- script/main --
+const LIMIT = 3
+interface Named { readonly name: string; greet(): string }
+export class Bell implements Named {
+  name = "bell"
+  private rung = 0
+  constructor() {}
+  greet(): string { return "ding" }
+}
+type Names = string[]
+export function main(): number { return LIMIT }
+-- symbols --
+constant LIMIT
+interface Named
+  field name
+  method greet
+class Bell
+  field name
+  field rung
+  method constructor
+  method greet
+type Names
+function main
+
+=== names from a module that doesn't parse go unchecked
+-- script/broken --
+export function f( {
+-- script/main --
+import { f } from "script/broken"
+export function main(): number {
+  f(1)
+  return no‸pe
+}
+-- diagnostics --
+script/broken:1:20: expected a parameter but found "{"
+script/main:4:10: unknown name nope
+
+=== what checks still records refs past an error
+-- script/main --
+export function main(): number {
+  let a = 1
+  let b: string = a
+  return a‸
+}
+-- hover --
+let a: number
+
+=== a comment at the end of the line above isn't a doc comment
+-- script/main --
+class Car {
+  speed: number = 4 // tiles per second
+  name: string
+}
+export function main(): string { return new Car().na‸me }
+-- hover --
+(field) Car.name: string

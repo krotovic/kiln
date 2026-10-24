@@ -11,6 +11,8 @@ type local struct {
 	slot     int
 	typ      *Type
 	constant bool
+	param    bool
+	pos      int // where it is declared
 }
 
 // funcCtx checks the code of one function, method, constructor, field value or module constant.
@@ -39,14 +41,36 @@ func (fc *funcCtx) push() { fc.scopes = append(fc.scopes, map[string]*local{}) }
 func (fc *funcCtx) pop()  { fc.scopes = fc.scopes[:len(fc.scopes)-1] }
 
 func (fc *funcCtx) declare(name string, t *Type, constant bool, pos int) *local {
+	return fc.declareAs(name, t, constant, false, pos)
+}
+
+// declareParam declares a function's parameter.
+func (fc *funcCtx) declareParam(name string, t *Type, pos int) {
+	fc.declareAs(name, t, false, true, pos)
+}
+
+func (fc *funcCtx) declareAs(name string, t *Type, constant, param bool, pos int) *local {
 	scope := fc.scopes[len(fc.scopes)-1]
 	if _, dup := scope[name]; dup {
 		fc.errorf(pos, "%s is already declared here", name)
 	}
-	l := &local{slot: fc.maxLocals, typ: t, constant: constant}
+	l := &local{slot: fc.maxLocals, typ: t, constant: constant, param: param, pos: pos}
 	fc.maxLocals++
 	scope[name] = l
+	fc.record(pos, name, localRef(l, name, fc.m, true))
 	return l
+}
+
+// record notes a name's occurrence for Analyze.
+func (fc *funcCtx) record(pos int, name string, ref Ref) {
+	if fc.c.rec != nil {
+		fc.c.rec.add(fc.m, pos, name, ref)
+	}
+}
+
+// probing reports whether name is the completion probe, which Complete puts where the cursor is.
+func (fc *funcCtx) probing(name string) bool {
+	return fc.c.rec != nil && fc.c.rec.probe != nil && name == probeName
 }
 
 func (fc *funcCtx) lookup(name string) *local {
@@ -253,12 +277,19 @@ func unify(a, b *Type) *Type {
 }
 
 func (fc *funcCtx) name(n *nameNode) (evalFn, *Type) {
+	if fc.probing(n.name) {
+		fc.c.rec.probe.names(fc)
+		return bad, typInvalid
+	}
 	if l := fc.lookup(n.name); l != nil {
+		fc.record(n.pos, n.name, localRef(l, n.name, fc.m, false))
 		slot := l.slot
 		return func(fr *frame) (Value, error) { return fr.locals[slot], nil }, l.typ
 	}
 	sym := fc.m.symbols[n.name]
 	switch {
+	case sym != nil && sym.kind == symInvalid:
+		return bad, typInvalid
 	case sym == nil && stdSigs[n.name] != nil:
 		fc.errorf(n.pos, "%s is a function: call it", n.name)
 	case sym == nil:
@@ -269,6 +300,7 @@ func (fc *funcCtx) name(n *nameNode) (evalFn, *Type) {
 			fc.errorf(n.pos, "%s is used before it is declared", n.name)
 			return bad, typInvalid
 		}
+		fc.record(n.pos, n.name, fc.c.symbolRef(sym, false, aliasLoc(fc.m, sym, n.name)))
 		mod, slot := k.mod, k.slot
 		return func(*frame) (Value, error) { return mod.globals[slot], nil }, k.typ
 	case sym.kind == symFunc:
@@ -368,13 +400,27 @@ func evalArgs(fr *frame, fns []evalFn) ([]Value, error) {
 // call checks a call of a function by name: one of the module's, an imported one, or the standard library's.
 func (fc *funcCtx) call(n *callNode) (evalFn, *Type) {
 	m, pos := fc.m, n.pos
+	if fc.probing(n.name) {
+		fc.c.rec.probe.names(fc)
+		for _, a := range n.args {
+			fc.expr(a, nil)
+		}
+		return bad, typInvalid
+	}
 	if fc.lookup(n.name) != nil {
 		fc.errorf(pos, "%s is a variable, not a function", n.name)
 		return bad, typInvalid
 	}
 	sym := fc.m.symbols[n.name]
+	if sym != nil && sym.kind == symInvalid {
+		for _, a := range n.args {
+			fc.expr(a, nil)
+		}
+		return bad, typInvalid
+	}
 	if sym == nil {
 		if sig := stdSigs[n.name]; sig != nil {
+			fc.record(pos, n.name, stdRef(n.name, sig))
 			return fc.callStd(n, sig)
 		}
 		fc.errorf(pos, "unknown function %s", n.name)
@@ -392,6 +438,7 @@ func (fc *funcCtx) call(n *callNode) (evalFn, *Type) {
 	if fn.result == nil {
 		fc.c.resolveSig(fn, fn.decl, sym.mod)
 	}
+	fc.record(pos, n.name, fc.c.symbolRef(sym, false, aliasLoc(fc.m, sym, n.name)))
 	args := fc.args(pos, n.name, fn.params, n.args)
 	return func(fr *frame) (Value, error) {
 		vals, err := evalArgs(fr, args)
@@ -405,6 +452,10 @@ func (fc *funcCtx) call(n *callNode) (evalFn, *Type) {
 func (fc *funcCtx) member(n *memberNode) (evalFn, *Type) {
 	m, pos := fc.m, n.pos
 	x, xt := fc.expr(n.x, nil)
+	if fc.probing(n.name) {
+		fc.c.rec.probe.members(fc, xt)
+		return bad, typInvalid
+	}
 	switch xt.kind {
 	case tInvalid:
 		return bad, xt
@@ -418,6 +469,7 @@ func (fc *funcCtx) member(n *memberNode) (evalFn, *Type) {
 			}
 			return bad, typInvalid
 		}
+		fc.record(pos, n.name, Ref{Kind: RefBuiltin, Detail: "(property) " + xt.String() + "." + n.name + ": number"})
 		return func(fr *frame) (Value, error) {
 			v, err := x(fr)
 			if err != nil {
@@ -447,6 +499,7 @@ func (fc *funcCtx) member(n *memberNode) (evalFn, *Type) {
 		if !fc.canSee(f.owner, f.private) {
 			fc.errorf(pos, "%s is private to %s", n.name, f.owner.name)
 		}
+		fc.record(pos, n.name, fieldRef(f.owner.name, f, false))
 		return func(fr *frame) (Value, error) {
 			o, err := receiver(fr, x, m, pos, n.name)
 			if err != nil {
@@ -464,6 +517,7 @@ func (fc *funcCtx) member(n *memberNode) (evalFn, *Type) {
 			}
 			return bad, typInvalid
 		}
+		fc.record(pos, n.name, fieldRef(xt.iface.name, f, false))
 		name := n.name
 		return func(fr *frame) (Value, error) {
 			o, err := receiver(fr, x, m, pos, name)
@@ -492,7 +546,15 @@ func receiver(fr *frame, x evalFn, m *moduleInfo, pos int, member string) (*obje
 func (fc *funcCtx) methodCall(n *methodCallNode) (evalFn, *Type) {
 	m, pos := fc.m, n.pos
 	x, xt := fc.expr(n.recv, nil)
+	if fc.probing(n.name) {
+		fc.c.rec.probe.members(fc, xt)
+		for _, a := range n.args {
+			fc.expr(a, nil)
+		}
+		return bad, typInvalid
+	}
 	var fn *funcInfo
+	owner := ""
 	switch xt.kind {
 	case tInvalid:
 		for _, a := range n.args {
@@ -510,6 +572,7 @@ func (fc *funcCtx) methodCall(n *methodCallNode) (evalFn, *Type) {
 		if !fc.canSee(fn.owner, fn.private) {
 			fc.errorf(pos, "%s is private to %s", n.name, fn.owner.name)
 		}
+		owner = fn.owner.name
 	case tIface:
 		fn = xt.iface.methods[n.name]
 		if fn == nil {
@@ -519,10 +582,12 @@ func (fc *funcCtx) methodCall(n *methodCallNode) (evalFn, *Type) {
 		if fn.optional {
 			fc.errorf(pos, "%s is optional, so only the host calls it", n.name)
 		}
+		owner = xt.iface.name
 	default:
 		fc.errorf(pos, "a %s has no methods", xt)
 		return bad, typInvalid
 	}
+	fc.record(pos, n.name, methodRef(owner, fn, false))
 	args := fc.args(pos, n.name, fn.params, n.args)
 	name := n.name
 	return func(fr *frame) (Value, error) {
@@ -544,11 +609,16 @@ func (fc *funcCtx) superMethod(n *superMethodNode) (evalFn, *Type) {
 		fc.errorf(pos, "super is only in the methods of a class that extends another")
 		return bad, typInvalid
 	}
+	if fc.probing(n.name) {
+		fc.c.rec.probe.members(fc, fc.class.super.typ)
+		return bad, typInvalid
+	}
 	fn := fc.class.super.methods[n.name]
 	if fn == nil || fn.private {
 		fc.errorf(pos, "%s has no method %s", fc.class.super.name, n.name)
 		return bad, typInvalid
 	}
+	fc.record(pos, n.name, methodRef(fn.owner.name, fn, false))
 	args := fc.args(pos, n.name, fn.params, n.args)
 	return func(fr *frame) (Value, error) {
 		vals, err := evalArgs(fr, args)

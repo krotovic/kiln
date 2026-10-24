@@ -1,0 +1,53 @@
+What can be renamed on its own. ‸ marks the cursor.
+
+=== a plain method
+-- script/main --
+class Bag { add(): void {} }
+export function main(): void { new Bag().ad‸d() }
+-- rename --
+ok
+
+=== a method that overrides
+-- script/main --
+class Base { greet(): string { return "a" } }
+class Child extends Base { gre‸et(): string { return "b" } }
+-- rename --
+it overrides Base.greet
+
+=== a method a subclass overrides
+-- script/main --
+class Base { gre‸et(): string { return "a" } }
+class Child extends Base { greet(): string { return "b" } }
+-- rename --
+Child overrides it
+
+=== a method that implements an interface's
+-- script/main --
+interface Greeter { greet(): string }
+class Hello implements Greeter { gre‸et(): string { return "hi" } }
+-- rename --
+it implements Greeter.greet
+
+=== a Behaviour method the host calls by name
+-- script/main --
+import { Greeter } from "test"
+export default class Hello implements Greeter {
+  greet(name: string): string { return name }
+  hel‸lo(): string { return "hi" }
+}
+-- rename --
+it implements Greeter.hello
+
+=== an interface member a class implements
+-- script/main --
+interface Greeter { gre‸et(): string }
+class Hello implements Greeter { greet(): string { return "hi" } }
+-- rename --
+Hello implements it
+
+=== an interface another extends
+-- script/main --
+interface Named { na‸me(): string }
+interface Person extends Named { age(): number }
+-- rename --
+Person extends Named

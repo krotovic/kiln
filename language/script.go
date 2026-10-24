@@ -91,6 +91,8 @@ type moduleInfo struct {
 	globals []Value
 	consts  []*constInfo
 	imports []string
+	// aliases are where names imported under another name (with as, or a default import) were imported
+	aliases map[string]Location
 }
 
 func newModule(id, src string) *moduleInfo {
@@ -296,9 +298,9 @@ func (in *Instance) Get(name string) (Value, bool) {
 	return in.obj.ref.(*object).fields[f.slot], true
 }
 
-// HostModule is a module the host offers scripts, imported by its name (such as "game"). Its source declares
-// it in the language: interfaces, classes and functions written in it, and native classes and functions whose
-// code is the host's. Natives maps their names to that code: "f" for a native function, "C.m" for a native class
+// HostModule is a module the host offers scripts, imported by its name (such as "game"). Its Source is a definition
+// file in the language: interfaces, types, and native classes and functions whose code is the host's (no bodies,
+// no constants), which tools show and navigate like any module. Natives maps their names to that code: "f" for a native function, "C.m" for a native class
 // C's method m, and "C.f" for its readonly field f. A host module imports nothing.
 type HostModule struct {
 	Name    string

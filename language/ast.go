@@ -159,6 +159,8 @@ type funcDecl struct {
 	body     *blockStmt
 	private  bool
 	optional bool // an interface's optional method
+	doc      string
+	end      int // the byte offset after it
 }
 
 type fieldDecl struct {
@@ -168,6 +170,8 @@ type fieldDecl struct {
 	init     node
 	private  bool
 	readonly bool
+	doc      string
+	end      int
 }
 
 type classDecl struct {
@@ -179,6 +183,7 @@ type classDecl struct {
 	methods    []*funcDecl
 	ctor       *funcDecl
 	native     bool
+	doc        string
 }
 
 type interfaceDecl struct {
@@ -187,12 +192,14 @@ type interfaceDecl struct {
 	extends []*typeExpr
 	fields  []*fieldDecl
 	methods []*funcDecl
+	doc     string
 }
 
 type aliasDecl struct {
 	pos  int
 	name string
 	typ  *typeExpr
+	doc  string
 }
 
 type constDecl struct {
@@ -200,24 +207,29 @@ type constDecl struct {
 	name string
 	typ  *typeExpr
 	init node
+	doc  string
 }
 
 type importName struct {
-	pos   int
-	name  string // the exported name
-	alias string // the local name
+	pos     int    // the local name's
+	namePos int    // the exported name's (the local name's without as; -1 for a default import)
+	name    string // the exported name
+	alias   string // the local name
 }
 
 type importDecl struct {
-	pos   int
-	from  string
-	names []importName
+	pos     int
+	from    string
+	fromPos int // the module name's string
+	names   []importName
 }
 
 // decl is one top-level declaration: exactly one of its fields is set.
 type decl struct {
 	exported  bool
 	isDefault bool
+	start     int // where it starts, export included
+	end       int
 	class     *classDecl
 	iface     *interfaceDecl
 	alias     *aliasDecl

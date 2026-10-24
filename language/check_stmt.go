@@ -348,8 +348,15 @@ func (fc *funcCtx) target(n node) (*Type, func(fr *frame, up update) error) {
 	m := fc.m
 	switch n := n.(type) {
 	case *nameNode:
+		if fc.probing(n.name) {
+			fc.c.rec.probe.names(fc)
+			return typInvalid, nil
+		}
 		l := fc.lookup(n.name)
 		if l == nil {
+			if sym := fc.m.symbols[n.name]; sym != nil && sym.kind == symInvalid {
+				return typInvalid, nil
+			}
 			if sym := fc.m.symbols[n.name]; sym != nil && sym.kind == symConst {
 				fc.errorf(n.pos, "%s is a constant", n.name)
 			} else {
@@ -360,6 +367,7 @@ func (fc *funcCtx) target(n node) (*Type, func(fr *frame, up update) error) {
 		if l.constant {
 			fc.errorf(n.pos, "%s is a constant", n.name)
 		}
+		fc.record(n.pos, n.name, localRef(l, n.name, fc.m, false))
 		slot := l.slot
 		return l.typ, func(fr *frame, up update) error {
 			v, err := up(fr, fr.locals[slot])
@@ -371,6 +379,10 @@ func (fc *funcCtx) target(n node) (*Type, func(fr *frame, up update) error) {
 		}
 	case *memberNode:
 		x, xt := fc.expr(n.x, nil)
+		if fc.probing(n.name) {
+			fc.c.rec.probe.members(fc, xt)
+			return typInvalid, nil
+		}
 		var f *fieldInfo
 		switch xt.kind {
 		case tInvalid:
@@ -389,6 +401,11 @@ func (fc *funcCtx) target(n node) (*Type, func(fr *frame, up update) error) {
 		}
 		if xt.kind == tClass && !fc.canSee(f.owner, f.private) {
 			fc.errorf(n.pos, "%s is private to %s", n.name, f.owner.name)
+		}
+		if xt.kind == tClass {
+			fc.record(n.pos, n.name, fieldRef(f.owner.name, f, false))
+		} else {
+			fc.record(n.pos, n.name, fieldRef(xt.iface.name, f, false))
 		}
 		if f.readonly {
 			_, onThis := n.x.(*thisNode)

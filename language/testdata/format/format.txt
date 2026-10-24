@@ -1,0 +1,94 @@
+The formatter: -- in -- is formatted to -- want --, which formatting again keeps.
+
+=== spacing and indentation
+-- in --
+import {A,B as C} from "script/x"
+export class Bag implements Named{
+size:number=0
+private items:Map<string,number> =new Map<string,number>()
+add(id:string,n:number):number{
+if(n<=0){return -1}
+const now=min(this.items.get(id)+n,99)
+this.items.set(id,now)
+for(let i=0;i<n;i++){this.size+=1}
+return now>10?now:-now
+}
+}
+-- want --
+import { A, B as C } from "script/x"
+export class Bag implements Named {
+  size: number = 0
+  private items: Map<string, number> = new Map<string, number>()
+  add(id: string, n: number): number {
+    if (n <= 0) { return -1 }
+    const now = min(this.items.get(id) + n, 99)
+    this.items.set(id, now)
+    for (let i = 0; i < n; i++) { this.size += 1 }
+    return now > 10 ? now : -now
+  }
+}
+
+=== comments and blank lines are kept, at most one blank line
+-- in --
+// A note
+export function f( a : number ) : number {   // trailing
+      /* block */
+
+
+      return a   *2
+}
+-- want --
+// A note
+export function f(a: number): number { // trailing
+  /* block */
+
+  return a * 2
+}
+
+=== optional methods, unary operators and arrays
+-- in --
+interface I { hello ? ( ) : void ; name : string }
+export function g(xs : number[] , ok : bool): number[] {
+  if ( ! ok ) { return [ - 1 , xs [ 0 ] ] }
+  return  xs . slice ( 1 )
+}
+-- want --
+interface I { hello?(): void; name: string }
+export function g(xs: number[], ok: bool): number[] {
+  if (!ok) { return [-1, xs[0]] }
+  return xs.slice(1)
+}
+
+=== continuation lines indent inside brackets
+-- in --
+export function f(): number {
+return clamp(1,
+2,
+3)
+}
+-- want --
+export function f(): number {
+  return clamp(1,
+    2,
+    3)
+}
+
+=== source that doesn't lex is refused
+-- in --
+export const s = "unterminated
+-- want --
+error
+
+=== unary operators never join into longer ones
+-- in --
+export function f(x: number): number {
+  let y = - -x
+  y = - - 1
+  return + +y
+}
+-- want --
+export function f(x: number): number {
+  let y = - -x
+  y = - -1
+  return + +y
+}

@@ -403,11 +403,12 @@ ctx, _ := host.Object("Context", runner)        // a native class's object, with
 _, err = inst.Call("onUpdate", ctx, language.Num(0.1))
 ```
 
-- **Host modules** are how a host offers scripts its API, declared in the language itself: interfaces and classes
-  written in it, and `native` classes and functions whose code is Go (`Natives`, by `"f"`, `"C.method"` and
-  `"C.field"`). Native fields are readonly; scripts can't make or extend a native class. A host module is checked
-  once, imports nothing, and must give every native it declares. New engine APIs (IO, networking…) arrive as more
-  host modules.
+- **Host modules** are how a host offers scripts its API. Each is a **definition file** in the language: only
+  interfaces, types, and `native` classes and functions, with no bodies or constants; their code is Go (`Natives`,
+  by `"f"`, `"C.method"` and `"C.field"`). Native fields are readonly; scripts can't make or extend a native class.
+  A host module is checked once, imports nothing, and must give every native it declares. Tools treat it like a
+  module: its declarations are where go to definition leads, and `Analyze(name, …)` reads it on its own (hover and
+  the outline in it). New engine APIs (IO, networking…) arrive as more definition files.
 - **`CompileScript`** loads the entry module and everything it imports from a **`Source`** (`MapSource` for tests),
   and returns the script or its `Diagnostic`s (`{Module, Line, Col, Msg}`, which carry what an editor's language
   server will need). `ModuleImports(src)` lists a module's imports without checking it, so a host can find what
@@ -418,6 +419,49 @@ _, err = inst.Call("onUpdate", ctx, language.Num(0.1))
   goroutine at a time. `FieldKind` and `Set` set its public number, string and bool fields; `HasMethod` tells
   whether it has a method (an optional one, say). Run-time errors are `*language.ScriptError`, which matches
   `language.ErrEval`.
+
+## Tooling
+
+The language's tools (`analysis.go`, `complete.go`, `format.go`) answer questions about source that is being
+written, for the [language server](architecture.md#language-server) behind the editor's code editor. They share the
+checker with `CompileScript`, so they see exactly what compiling sees.
+
+- **`Analyze(entry, src, opts)`** loads and checks a script like `CompileScript` (or, with a host module's name as
+  the entry, that module's definition file on its own), but goes on past errors (a module
+  that doesn't parse is left out, and the names imported from it go unchecked rather than unknown), and records
+  every name occurrence as a `Ref`: its range, kind (local, parameter, field, method, function, class, interface,
+  type, constant, module, built-in), its type or signature as hover shows it, its doc comment, its `Signature`
+  (for calls), and its definition `Location`: in a script, or in a host module's definition file (none for the
+  standard library and the built-in members). `At(module,
+  offset)` finds the name at a position, `References(def)` every occurrence of what is declared there, and
+  `Symbols(module)` the outline: classes with their fields, methods and constructor, interfaces, functions, types
+  and constants.
+- **Doc comments** are the `//` lines or `/* */` block right above a declaration (no blank line between), each on a
+  line of its own, without their markers: `/** A bell. */`. A comment at the end of a line of code belongs to that
+  code.
+- **Import aliases** count as declared where they are imported: renaming `B` in `import { A as B }` renames the
+  module's uses of `B`, and renaming `A` renames `A` in the import.
+- **`Complete(module, src, opts, offset)`** puts a probe name in place of the word at the cursor (and, if that
+  doesn't parse, ends the statement right after it, for `ctx.| log(…)`) and checks the module; the checker, meeting
+  the probe, records what could go there: after a dot, the members the code may use (private ones only inside
+  their class, no optional interface methods; arrays', maps' and strings' built-ins); for a name, the variables in
+  scope, the module's constants, functions and classes, the standard library and keywords; for a type, the types.
+  In an import's `{ }` it offers the module's exports, and in its quotes the module names the `Source` lists
+  (`Lister`) and the host modules. Source that still doesn't parse gets the keywords that start declarations and
+  statements.
+- **`SignatureAt(module, src, opts, offset)`** finds the innermost `(` still open at the cursor, the function,
+  method or constructor before it, and the argument the cursor is in (counting commas); an unfinished call is
+  completed with the probe (and a `)`) so the rest of the module checks.
+- **`Format(src)`** rewrites a module in one style: two spaces of indentation per open bracket, the line breaks as
+  written (at most one blank line in a row), spaces around binary operators and after commas, colons and keywords,
+  none inside brackets, around dots, after unary operators (unless the next is one too: `- -x` never becomes `--x`)
+  or in `Map<K, V>`. Comments stay where they are; the
+  tokens never change; formatting formatted source changes nothing. Source that doesn't lex is refused.
+- **`ValidName(name)`** says whether a rename may use a name, and **`RenameConflict(def)`** why a field or method
+  can't be renamed on its own: it overrides a base class's member or a subclass overrides it, it implements a
+  member of an interface its class names in `implements` (the host's `Behaviour` too, whose methods the host calls
+  by name), or, for an interface's member, a class implementing the interface has it, or another interface extends
+  it. Renaming one of them would break the others; classes that satisfy an interface without naming it aren't seen.
 
 ## In the game
 
@@ -502,7 +546,8 @@ export default class Bell implements Behaviour {
   string and bool fields of the same names, after its constructor and before `onStart`. Text goes into a string
   field as written; a number or bool field reads it as a literal. A prop without such a field, or whose text isn't
   of the field's kind, is logged and leaves the field as the class has it.
-- **The `"game"` module:**
+- **The `"game"` module** is the definition file `internal/game/scripting/game.d.als` (embedded in the servers);
+  the code editor opens it, read-only, as `game.d.als`:
 
   ```ts
   export interface Behaviour {
@@ -551,3 +596,10 @@ Scripts have their cases in `testdata/scripts/*.txt`, which `TestScriptCases` ru
 - `-- eval error --`: part of the error `main()` fails with.
 
 Instances, props, memory, sharing a script between goroutines and host modules are tested in `script_test.go`.
+
+The tools have cases of their own in the same format: `testdata/tools/*.txt` (`TestToolCases`), where `‸` in a
+module marks the cursor and the sections say what to expect there: `-- hover --` (the detail, then the doc),
+`-- definition --` (`module:line:col` or `none`), `-- completions --` (lines `+ label` that must be offered and
+`- label` that mustn't), `-- signature --` (`label @ active parameter` or `none`), `-- references --`,
+`-- symbols --` (the outline) and `-- diagnostics --`. `testdata/format/*.txt` (`TestFormatCases`) has `-- in --`
+and `-- want --` (or `error`); every case also checks that formatting again changes nothing and keeps the tokens.

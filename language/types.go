@@ -172,7 +172,8 @@ type fieldInfo struct {
 	readonly bool
 	decl     *fieldDecl
 	init     evalFn
-	getter   NativeFunc // a native class's field
+	getter   NativeFunc  // a native class's field
+	mod      *moduleInfo // where it is declared
 }
 
 // isA reports whether c is base or derives from it.
@@ -233,6 +234,20 @@ type ifaceInfo struct {
 	order   []string // member names in declaration order, for messages
 	typ     *Type
 	state   uint8
+	bases   []*ifaceInfo // the interfaces it extends
+}
+
+// extends reports whether i is base or extends it, directly or not.
+func (i *ifaceInfo) extends(base *ifaceInfo) bool {
+	if i == base {
+		return true
+	}
+	for _, b := range i.bases {
+		if b.extends(base) {
+			return true
+		}
+	}
+	return false
 }
 
 // satisfies says why c doesn't satisfy i, or "" when it does: c needs every field of i with the same type (a

@@ -391,6 +391,7 @@ func (fc *funcCtx) builtinMethod(n *methodCallNode, x evalFn, xt *Type) (evalFn,
 		fc.errorf(pos, "a %s has no method %s", xt, n.name)
 		return bad, typInvalid
 	}
+	fc.record(pos, n.name, builtinMethodRef(xt, n.name, bm))
 	params := bm.params(xt)
 	if len(n.args) < bm.minArgs || (bm.maxArgs >= 0 && len(n.args) > bm.maxArgs) {
 		want := plural(bm.minArgs)

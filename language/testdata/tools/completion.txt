@@ -1,0 +1,219 @@
+Completions and signature help. ‸ marks the cursor.
+
+=== members of a class, private ones only inside it
+-- script/main --
+class Bag {
+  size = 0
+  private secret = 1
+  add(n: number): void {}
+  private hide(): void {}
+}
+export function main(): void {
+  const b = new Bag()
+  b.‸
+}
+-- completions --
++ size
++ add
+- secret
+- hide
+- length
+
+=== members while typing a name
+-- script/main --
+class Bag { size = 0; add(n: number): void {} }
+export function main(): void {
+  const b = new Bag()
+  b.si‸
+}
+-- completions --
++ size
++ add
+
+=== private members inside the class
+-- script/main --
+class Bag {
+  private secret = 1
+  peek(): number { return this.‸ }
+}
+-- completions --
++ secret
++ peek
+
+=== members of the host's classes, and an interface's without its optional methods
+-- script/main --
+import { probe, Greeter } from "test"
+export function main(g: Greeter): void {
+  probe("a").‸
+  g.gr
+}
+-- completions --
++ name
++ twice
+
+=== optional methods aren't offered
+-- script/main --
+import { Greeter } from "test"
+export function main(g: Greeter): void {
+  g.‸
+}
+-- completions --
++ greet
+- hello
+
+=== members of arrays, maps and strings
+-- script/main --
+export function main(): void {
+  const xs = [1, 2]
+  xs.‸
+}
+-- completions --
++ length
++ push
++ indexOf
+- size
+
+=== names in scope
+-- script/main --
+const LIMIT = 3
+function helper(): number { return 1 }
+class Box {}
+interface Shape {}
+export function main(count: number): number {
+  let total = 0
+  for (const item of [1]) {
+    return ‸
+  }
+  return 0
+}
+-- completions --
++ item
++ total
++ count
++ LIMIT
++ helper
++ Box
++ min
++ clamp
++ null
+- Shape
+
+=== names at the start of a statement
+-- script/main --
+export function main(): void {
+  let total = 0
+  ‸
+}
+-- completions --
++ total
++ let
++ if
++ return
+
+=== types
+-- script/main --
+class Box {}
+interface Shape {}
+type Names = string[]
+export function main(): void {
+  let b: ‸
+}
+-- completions --
++ number
++ Map
++ Box
++ Shape
++ Names
+- main
+
+=== an import's names
+-- script/util --
+export function shout(s: string): string { return s }
+export const LIMIT = 3
+function hidden(): void {}
+-- script/main --
+import { ‸ } from "script/util"
+-- completions --
++ shout
++ LIMIT
+- hidden
+
+=== the host module's names
+-- script/main --
+import { l‸ } from "test"
+-- completions --
++ log
++ Probe
++ Greeter
+
+=== module names in an import's quotes
+-- script/util --
+export const X = 1
+-- script/main --
+import { X } from "scr‸"
+-- completions --
++ script/util
++ test
+
+=== signature help in a call
+-- script/main --
+function mix(a: number, b: string): string { return b }
+export function main(): string { return mix(1, ‸) }
+-- signature --
+mix(a: number, b: string): string @ 1
+
+=== signature help with the call unclosed
+-- script/main --
+function mix(a: number, b: string): string { return b }
+export function main(): string {
+  return mix(‸
+}
+-- signature --
+mix(a: number, b: string): string @ 0
+
+=== signature help for a method and a constructor
+-- script/main --
+class Bag {
+  constructor(name: string, size: number) {}
+  add(n: number): void {}
+}
+export function main(): void {
+  const b = new Bag("a", ‸)
+}
+-- signature --
+new Bag(name: string, size: number): Bag @ 1
+
+=== signature help for the standard library
+-- script/main --
+export function main(): number { return clamp(1, ‸) }
+-- signature --
+clamp(a: number, b: number, c: number): number @ 1
+
+=== signature help for a built-in method
+-- script/main --
+export function main(): string {
+  const xs = ["a"]
+  return xs.join(‸)
+}
+-- signature --
+join(a: string): string @ 0
+
+=== no signature outside a call
+-- script/main --
+export function main(): number {
+  let x = 1‸
+  return x
+}
+-- signature --
+none
+
+=== members before code already on the line
+-- script/main --
+class Bag { size = 0; add(n: number): void {} }
+export function main(): void {
+  const b = new Bag()
+  { b.‸ b.add(1) }
+}
+-- completions --
++ size
++ add

@@ -1,5 +1,10 @@
 package language
 
+import (
+	"sort"
+	"strings"
+)
+
 // keywords can't be names in scripts. void is a type; constructor, of, from, as, readonly, private, native and
 // default are words only where the grammar expects them.
 var keywords = map[string]bool{
@@ -31,11 +36,11 @@ func parseModule(src string, limits ScriptLimits, native bool) (*moduleAST, erro
 	if len(src) > limits.MaxSource {
 		return nil, compileErr(0, "longer than %d bytes", limits.MaxSource)
 	}
-	toks, err := lexScript(src)
+	toks, comments, err := lexScript(src)
 	if err != nil {
 		return nil, err
 	}
-	p := &parser{toks: toks, script: true, native: native,
+	p := &parser{toks: toks, script: true, native: native, src: src, comments: comments,
 		limits: Limits{MaxDepth: limits.MaxNesting, MaxNodes: int(^uint(0) >> 1), MaxString: limits.MaxString}}
 	m := &moduleAST{}
 	for p.isWord("import") {
@@ -122,7 +127,7 @@ func (p *parser) importDecl() (*importDecl, error) {
 		if err != nil {
 			return nil, err
 		}
-		imp.names = append(imp.names, importName{pos: n.pos, name: "default", alias: n.text})
+		imp.names = append(imp.names, importName{pos: n.pos, namePos: -1, name: "default", alias: n.text})
 		if !p.isOp(",") {
 			return p.importFrom(imp)
 		}
@@ -136,7 +141,7 @@ func (p *parser) importDecl() (*importDecl, error) {
 		if err != nil {
 			return nil, err
 		}
-		in := importName{pos: n.pos, name: n.text, alias: n.text}
+		in := importName{pos: n.pos, namePos: n.pos, name: n.text, alias: n.text}
 		if p.isWord("as") {
 			p.next()
 			a, err := p.name("a name after as")
@@ -168,12 +173,13 @@ func (p *parser) importFrom(imp *importDecl) (*importDecl, error) {
 	if from.kind != tokString {
 		return nil, compileErr(from.pos, "expected the module's name in quotes but found %s", describe(from))
 	}
-	imp.from = from.text
+	imp.from, imp.fromPos = from.text, from.pos
 	return imp, p.end()
 }
 
 func (p *parser) decl() (*decl, error) {
-	d := &decl{}
+	d := &decl{start: p.peek().pos}
+	doc := p.docBefore(p.peek().pos)
 	if p.isWord("import") {
 		return nil, compileErr(p.peek().pos, "imports come before everything else")
 	}
@@ -197,6 +203,10 @@ func (p *parser) decl() (*decl, error) {
 		native = true
 	}
 	t := p.peek()
+	// A host module is a definition file: it declares, and the host's code does the rest
+	if p.native && !native && !p.isWord("interface") && !p.isWord("type") {
+		return nil, compileErr(t.pos, "a host module is a definition file: interfaces, types, and native classes and functions only")
+	}
 	var err error
 	switch {
 	case p.isWord("class"):
@@ -219,6 +229,19 @@ func (p *parser) decl() (*decl, error) {
 	}
 	if err != nil {
 		return nil, err
+	}
+	d.end = p.lastEnd()
+	switch {
+	case d.class != nil:
+		d.class.doc = doc
+	case d.iface != nil:
+		d.iface.doc = doc
+	case d.alias != nil:
+		d.alias.doc = doc
+	case d.fn != nil:
+		d.fn.doc = doc
+	case d.konst != nil:
+		d.konst.doc = doc
 	}
 	return d, nil
 }
@@ -308,6 +331,7 @@ func (p *parser) classDecl(native bool) (*classDecl, error) {
 			p.next()
 			continue
 		}
+		doc := p.docBefore(p.peek().pos)
 		var private, readonly bool
 		for p.isWord("private") || p.isWord("readonly") {
 			if p.next().text == "private" {
@@ -330,6 +354,7 @@ func (p *parser) classDecl(native bool) (*classDecl, error) {
 			if c.ctor.result != nil {
 				return nil, compileErr(c.ctor.result.pos, "a constructor returns nothing")
 			}
+			c.ctor.doc, c.ctor.end = doc, p.lastEnd()
 			continue
 		}
 		mn, err := p.name("a field or method")
@@ -344,7 +369,7 @@ func (p *parser) classDecl(native bool) (*classDecl, error) {
 			if err != nil {
 				return nil, err
 			}
-			m.private = private
+			m.private, m.doc, m.end = private, doc, p.lastEnd()
 			c.methods = append(c.methods, m)
 			continue
 		}
@@ -355,6 +380,7 @@ func (p *parser) classDecl(native bool) (*classDecl, error) {
 		if native && f.init != nil {
 			return nil, compileErr(f.pos, "a native class's fields come from the host")
 		}
+		f.doc, f.end = doc, p.lastEnd()
 		c.fields = append(c.fields, f)
 	}
 	p.next()
@@ -476,6 +502,7 @@ func (p *parser) interfaceDecl() (*interfaceDecl, error) {
 			p.next()
 			continue
 		}
+		doc := p.docBefore(p.peek().pos)
 		readonly := false
 		if p.isWord("readonly") {
 			p.next()
@@ -494,7 +521,7 @@ func (p *parser) interfaceDecl() (*interfaceDecl, error) {
 			if readonly {
 				return nil, compileErr(mn.pos, "a method can't be readonly")
 			}
-			m := &funcDecl{pos: mn.pos, name: mn.text, optional: optional}
+			m := &funcDecl{pos: mn.pos, name: mn.text, optional: optional, doc: doc}
 			if m.params, err = p.params(); err != nil {
 				return nil, err
 			}
@@ -507,6 +534,7 @@ func (p *parser) interfaceDecl() (*interfaceDecl, error) {
 					m.result = nil
 				}
 			}
+			m.end = p.lastEnd()
 			d.methods = append(d.methods, m)
 		} else {
 			if optional {
@@ -519,7 +547,7 @@ func (p *parser) interfaceDecl() (*interfaceDecl, error) {
 			if err != nil {
 				return nil, err
 			}
-			d.fields = append(d.fields, &fieldDecl{pos: mn.pos, name: mn.text, typ: typ, readonly: readonly})
+			d.fields = append(d.fields, &fieldDecl{pos: mn.pos, name: mn.text, typ: typ, readonly: readonly, doc: doc, end: p.lastEnd()})
 		}
 		if t := p.peek(); t.kind == tokOp && (t.text == ";" || t.text == ",") {
 			p.next()
@@ -774,4 +802,48 @@ func (p *parser) forStmt() (stmt, error) {
 		return nil, err
 	}
 	return s, nil
+}
+
+// lastEnd is the byte offset after the last token read.
+func (p *parser) lastEnd() int {
+	if p.at == 0 {
+		return 0
+	}
+	return p.toks[p.at-1].end
+}
+
+// docBefore is the doc comment right above the token at pos: the comments that end just before it (with nothing
+// but one line break between) and the comments right above those, without their markers.
+func (p *parser) docBefore(pos int) string {
+	i := sort.Search(len(p.comments), func(i int) bool { return p.comments[i].end > pos }) - 1
+	var lines []string
+	for next := pos; i >= 0; i-- {
+		c := p.comments[i]
+		gap := p.src[c.end:next]
+		if strings.TrimSpace(gap) != "" || strings.Count(gap, "\n") > 1 {
+			break
+		}
+		// A comment at the end of a line of code belongs to that code, not to what follows
+		lineStart := strings.LastIndexByte(p.src[:c.start], '\n') + 1
+		if strings.TrimSpace(p.src[lineStart:c.start]) != "" {
+			break
+		}
+		lines = append([]string{commentText(c.text)}, lines...)
+		next = c.start
+	}
+	return strings.TrimSpace(strings.Join(lines, "\n"))
+}
+
+// commentText strips a comment's markers: //, /*, */, /** and the * that starts a line of a block comment.
+func commentText(c string) string {
+	if strings.HasPrefix(c, "//") {
+		return strings.TrimSpace(strings.TrimPrefix(c, "//"))
+	}
+	c = strings.TrimSuffix(strings.TrimPrefix(strings.TrimPrefix(c, "/*"), "*"), "*/")
+	lines := strings.Split(c, "\n")
+	for i, l := range lines {
+		l = strings.TrimSpace(l)
+		lines[i] = strings.TrimSpace(strings.TrimPrefix(l, "*"))
+	}
+	return strings.TrimSpace(strings.Join(lines, "\n"))
 }

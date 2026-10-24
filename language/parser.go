@@ -35,6 +35,9 @@ type parser struct {
 	limits Limits
 	script bool
 	native bool // a host module's source, which may declare native classes and functions
+	// src and comments are a script's, for doc comments
+	src      string
+	comments []comment
 }
 
 func parse(src string, limits Limits) (node, error) {
