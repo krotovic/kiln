@@ -554,6 +554,7 @@ export default class Bell implements Behaviour {
     onStart?(ctx: Context): void               // once, when the object is made and its props are set
     onUpdate?(ctx: Context, dt: number): void  // ten times a second; dt in seconds
     onStop?(ctx: Context): void                // when the object, component or script changes or goes, or the server stops
+    onAction?(ctx: Context, event: ActionEvent): void  // a player pressed an action (instance scripts; see below)
   }
   export native class Context {
     readonly object: GameObject
@@ -562,14 +563,57 @@ export default class Bell implements Behaviour {
     hour(): number                             // the game hour, 0 to 24
     now(): number                              // seconds since 1970
   }
-  export native class GameObject { readonly id: string; readonly name: string; readonly x: number;
-                                   readonly y: number; readonly h: number; readonly rotation: number }
+  export native class GameObject {
+    readonly id: string; readonly name: string
+    readonly parent: string                    // the object it hangs from, "" at the zone's root
+    readonly x: number; readonly y: number; readonly h: number; readonly rotation: number  // in the zone
+    setContextActive(context: InputContextRef, player: Player, active: boolean): void
+  }
+  export native class ActionEvent {
+    readonly action: string                    // the input definition's action ID, such as "interact"
+    readonly context: string                   // the input context it was pressed in ("global": the zone's own)
+    readonly player: Player
+    handled(): boolean                         // whether a script below took it already
+    handle(): void                             // takes it: no script above gets it
+  }
+  export native class Player { readonly id: string; readonly name: string; readonly x: number; readonly y: number }
+  export native class InputContextRef { readonly name: string; readonly label: string; readonly priority: number;
+                                        readonly exists: boolean }
+  export native function inputContext(name: string): InputContextRef  // a context of the input definition, by name
   export native function log(message: string): void   // the server's log, at most 20 lines a second per script
   ```
 
-  Scripts read the world but don't change it yet.
-- **Budgets.** Each call (the constructor, `onStart`, one `onUpdate`, `onStop`) runs under the default
-  [budgets](#budgets).
+  An object's place (`x`, `y`, `h`, `rotation`) is where it is in the zone: its own transform composed with its
+  parents'. Scripts read the world but don't change it yet; they switch players' input contexts.
+- **Actions.** A player's press of an action that the world's input definition sends to the server (see
+  [Input](architecture.md#input)) reaches the instance scripts as `onAction`. It goes through the zone's tree from the
+  bottom up: for an input context, the subtree of the object whose InputContext component it was pressed in
+  (children before their parents, siblings nearest to the player first), then that object's parents up to the zone;
+  for the global context, the whole zone that way. Each script with `onAction` gets it, until one calls
+  `event.handle()`. Fragment and world scripts get no actions (no player is there).
+
+  ```ts
+  import { Behaviour, Context, ActionEvent, inputContext } from "game"
+
+  // A shop counter: "interact" opens the shop for the player, whose shop.buy then reaches the counter first.
+  export default class Counter implements Behaviour {
+    onAction(ctx: Context, event: ActionEvent): void {
+      if (event.action == "interact") {
+        ctx.object.setContextActive(inputContext("shop"), event.player, true)
+        event.handle()
+      } else if (event.action == "shop.buy") {
+        event.handle()
+      }
+    }
+  }
+  ```
+- **Input contexts.** `inputContext(name)` finds a context of the input definition (`exists` is false for none).
+  `setContextActive(context, player, active)` turns it on or off for that player: the nearest InputContext
+  component of that context on the object's path (the object's own, or else its nearest parent's), so any object of
+  the subtree can switch it. It fails (and the script stops, as for any error) for a context that doesn't exist, with
+  no such component on the path, for a player who isn't in the zone, and outside instance scripts.
+- **Budgets.** Each call (the constructor, `onStart`, one `onUpdate`, one `onAction`, `onStop`) runs under the
+  default [budgets](#budgets).
 - **Failures.** A script that doesn't compile, isn't a `Behaviour` or whose call fails is stopped and logged once,
   without `onStop`. It starts again when its object, its component or any of its modules changes.
 
