@@ -13,16 +13,17 @@ own engine, so a script gives the same results everywhere.
 
 This document describes the language first ([Language reference](#language-reference)), then how Go and
 TypeScript code embed it ([Embedding](#embedding-go)), how scripts are compiled ([Compiling to
-WebAssembly](#compiling-to-webassembly)), then what the game does with it ([In the game](#in-the-game)): spawn
-params use expressions, and `Script` components run scripts on zone objects.
+WebAssembly](#compiling-to-webassembly)), then what the game does with it ([In the game](#in-the-game)): prefabs
+compute their fields with expressions, `Script` components run scripts on zone objects, and spawn scripts decide
+what spawners spawn.
 
 ## Design goals
 
 - **Safe.** Code reaches only what its host gives it: no I/O, no clock, nothing global. An expression has no loops,
   so it finishes at once; a script loops and recurses, but every call from the host stops after a budget of steps,
   nested calls and memory (see [Budgets](#budgets)).
-- **Deterministic.** The same inputs always give the same result. There is no random function: randomness comes in
-  only as inputs the host draws from a seeded generator (`RANDOM_SEED`). Maps iterate in insertion order.
+- **Deterministic.** The same inputs always give the same result. The language has no random function: randomness
+  comes in only from the host, drawn from a seeded generator (`RANDOM_SEED`), such as the game's `rand()`. Maps iterate in insertion order.
 - **Strictly typed.** Operators accept only the types they're meant for, and the only implicit conversion is
   joining strings with `+`, so mistakes fail loudly instead of producing `NaN` or `"undefined"`. There is no
   `undefined` at all: every value starts at its type's [zero value](#zero-values).
@@ -31,7 +32,7 @@ params use expressions, and `Script` components run scripts on zone objects.
 - **Fast, the same everywhere.** A script compiles to one WebAssembly module, checked budgets included, which runs
   on the servers and in the browser alike, at the speed of compiled code.
 - **Reusable.** Nothing in the language knows about the game. Hosts embed it with their own names, functions and
-  modules: spawn params and script components today; quest conditions, world-event rules, loot tables or UI
+  modules: prefab expressions, script components and spawn scripts today; quest conditions, world-event rules, loot tables or UI
   formulas later.
 
 ## Language reference
@@ -563,47 +564,81 @@ checker with `CompileScript`, so they see exactly what compiling sees.
 
 ## In the game
 
-### Spawn params
+### Prefab expressions
 
-A spawner's template can have params that set fields of its components when an entity spawns (see
-[Spawning](architecture.md#spawning)). A param with the `expression` source evaluates an expression and converts the
-result with its optional type.
+A [prefab](architecture.md#prefabs) computes values from its props with expressions, worked out when it is made (in a
+placement, or for a spawn):
 
-- **Names.** Every expression sees these built-ins:
-
-  | Name | Value |
-  | --- | --- |
-  | `hour` | the game hour, `0` to `24` (a game day lasts 2 hours) |
-  | `count` | the spawner's live entities before this spawn |
-  | `max` | the spawner's max count |
-  | `seq` | this spawn's number (0, 1, 2, … for the spawner) |
-  | `x`, `y` | where the entity spawns, in tiles |
-
-  It also sees every param named before it: time of day, random and spawn count params, and other expressions. Param
-  names follow the same rules as names, up to 32 characters, and can't reuse a built-in.
-- **Order.** Params resolve in the order they're listed, so an expression can use only the params above it. Compiling
-  checks this: a name defined below is unknown.
-- **Values from lists.** A time of day, random or count step value is read as a literal, so `"2"` is the number 2,
-  and `"01"` is the number 1 that is still written `01`.
-- **Into a field.** A param with a field writes its value into that field of the template's component: `asset_id`,
-  `scale` (models), and `asset_id`, `animation`, `facing`, `width` and `height` (sprites).
-  - Every value suits a string field, in its text form (a list value as it was written).
-  - A value of the wrong kind, or one the component refuses (an unknown facing, a size out of range), leaves the field
-    as the template has it.
-- **Errors.** An expression that doesn't compile is refused when the spawner is saved; the World answers `400` with
-  the message, which the editor shows. A param whose expression fails at run time stays without a value; an
-  expression that uses it fails in turn, and its field keeps the template's value. The rest of the params still
-  apply, and the server logs the first problem of each spawner once.
+- **Computed props** are expressions over the prefab's props and the computed props above them, converted with
+  their optional type (`number`, `integer`, `string` or `bool`): `isNightTime = timeOfDay >= 20 || timeOfDay < 6`.
+- **Fields.** Any field of a prefab's objects and components can be an expression in place of its static value:
+  `name`, `transform.x`, `asset_id`, `width`, `offset.x`, `props.speed` (a script's, a spawner's or a nested
+  prefab's prop)… They see every prop and computed prop. A number field wants a number, a bool field a bool, and a
+  string field takes any value in its text form.
+- **Names.** Props and computed props are named like variables (letters, digits and underscores, starting with a
+  letter, up to 32); a prop's default is text of its type, read as a [literal](#text-form-and-conversions) for
+  numbers and bools.
+- **Errors.** An expression that doesn't compile, or uses a name that isn't there, is refused when the prefab is
+  saved, naming the prop or field and the column. One that fails when it runs (a division by zero, a value of the
+  wrong kind for its field, a computed prop without a value) leaves its field as the prefab has it; a computed prop
+  that fails has no value, so what uses it fails in turn. The rest of the prefab is made all the same, and the server
+  logs what went wrong once per placement.
 - **Limits.** 200 characters, 16 levels of nesting, 64 parts, and strings of at most 256 characters.
 
-Example: a herb that glows at night and grows as more spawn around it.
+Example: a herb that glows at night, as big as its `size` prop says.
 
-| # | Name | Sets | Source |
-| --- | --- | --- | --- |
-| 1 | `phase` | (variable only) | time of day: 20 to 6 → `night`, 6 to 20 → `day` |
-| 2 | `variant` | (variable only) | random: `1` (weight 3), `2` (weight 1) |
-| 3 | | sprite `asset_id` | expression `"image/herb-" + phase + "-" + str(variant)` |
-| 4 | | sprite `width` | expression `clamp(1 + count * 0.25, 1, 2)` |
+| Prop | Type | Default |
+| --- | --- | --- |
+| `timeOfDay` | number | `12` |
+| `size` | number | `1` |
+
+| Computed prop | Expression |
+| --- | --- |
+| `isNightTime` (bool) | `timeOfDay >= 20 \|\| timeOfDay < 6` |
+
+| Field | Expression |
+| --- | --- |
+| sprite `asset_id` | `isNightTime ? "image/herb-glow" : "image/herb"` |
+| sprite `width` | `clamp(size, 0.5, 2)` |
+
+### Spawn scripts
+
+A Spawner component runs a spawn script, a script asset whose default export satisfies `SpawnScript` (see
+[Spawning](architecture.md#spawning)). Every interval its server calls `onSpawn`, which answers what to spawn, or
+`null` for nothing this time:
+
+```ts
+import { SpawnScript, SpawnContext, Spawn, prefab, rand } from "game"
+
+// Keeps up to `max` herbs around the spawner, a rare one in ten golden.
+export default class Herbs implements SpawnScript {
+  max = 5              // the spawner's props set these, as a Script component's do
+  lifetime = 0
+
+  onSpawn(ctx: SpawnContext): Spawn {
+    if (ctx.count >= this.max) { return null }
+    const at = ctx.randomPoint(8, 8)        // where a player could stand, in an 8 × 8 box around the spawner
+    if (at == null) { return null }
+    const herb = prefab("prefab/herb").with("timeOfDay", str(ctx.hour)).with("golden", str(rand() < 0.1))
+    return ctx.spawn(herb).at(at).lives(this.lifetime)
+  }
+}
+```
+
+- **`SpawnContext`**: `object` (the spawner's), `zone`, `scope`, `hour` (the game hour), `count` (its spawns alive),
+  `seq` (the call's number), `now()`, `randomPoint(width, height)` (a point a player could stand on, in the box
+  centered on the spawner, or `null` after 16 tries) and `spawn(prefab)`.
+- **`prefab(id).with(name, value)`** names the prefab and its props (at most 32, values up to 256 characters), read
+  as their types say. **`Spawn`** is the answer: at the spawner's place and living until something despawns it,
+  unless `at(point)` (a point inside the zone; `point(x, y)` makes one) and `lives(seconds)` (0 to 86 400) say
+  otherwise.
+- **`rand()`** is a number from 0 up to 1. In `onSpawn` it draws, like `randomPoint`, from the call's own generator,
+  seeded with `RANDOM_SEED`, the spawner and the call's number, so the same seed always spawns the same, whatever
+  else runs. In any other script it draws from a generator of the script's own.
+- **Callbacks.** `onStart` and `onStop` are optional, as in a `Behaviour`; the object lives as long as its spawner
+  is unchanged, so it may keep state between calls.
+- **Spawns' scripts.** A spawned prefab's Script components run on the server that owns the spawn, and read the
+  spawn's props with `ctx.object.prop(name)`.
 
 ### Script components
 
@@ -641,7 +676,7 @@ export default class Bell implements Behaviour {
   own copy; `fragment`, the zone's fragment; or `world`, the World) and its `props`.
 - **The class.** The script's default export must be a class with a constructor taking no arguments that satisfies
   `Behaviour`.
-- **Props** (at most 32, named like spawn params, values up to 256 characters) set the class's public number,
+- **Props** (at most 32, named like variables, values up to 256 characters) set the class's public number,
   string and bool fields of the same names, after its constructor and before `onStart`. Text goes into a string
   field as written; a number or bool field reads it as a literal, and holds the number: `"01"` is 1, written `1`. A prop without such a field, or whose text isn't
   of the field's kind, is logged and leaves the field as the class has it.
@@ -669,6 +704,7 @@ export default class Bell implements Behaviour {
     setContextActive(context: InputContextRef, player: Player, active: boolean): void
     showUI(ui: UIRef, player: Player): void    // shows the player a UI (instance scripts; see below)
     hideUI(ui: UIRef, player: Player): void    // closes it, if it is open
+    prop(name: string): string                 // a prop of the prefab it comes from ("" for none; see below)
   }
   export native class UIRef { readonly id: string; with(name: string, value: string): UIRef }
   export native function ui(id: string): UIRef // a UI asset, such as "ui/shop"
@@ -684,10 +720,16 @@ export default class Bell implements Behaviour {
                                         readonly exists: boolean }
   export native function inputContext(name: string): InputContextRef  // a context of the input definition, by name
   export native function log(message: string): void   // the server's log, at most 20 lines a second per script
+  export native function rand(): number                // 0 up to 1, seeded (see Spawn scripts)
+  // and for spawn scripts: SpawnScript, SpawnContext, Spawn, PrefabRef, prefab(), Point, point()
   ```
 
   An object's place (`x`, `y`, `h`, `rotation`) is where it is in the zone: its own transform composed with its
   parents'. Scripts read the world but don't change it yet; they switch players' input contexts.
+- **Prefab props.** `ctx.object.prop(name)` reads a prop or computed prop, in its text form, of the prefab the object
+  comes from: the nearest [prefab placement](architecture.md#prefabs) on its path (its own, or else its nearest
+  parent's), or the spawn it is part of; `""` when there is none. A script's props inside a prefab can also be
+  [expressions](#prefab-expressions) over the prefab's props.
 - **Actions.** A player's press of an action that the world's input definition sends to the server (see
   [Input](architecture.md#input)) reaches the instance scripts as `onAction`. It goes through the zone's tree from the
   bottom up: for an input context, the subtree of the object whose InputContext component it was pressed in

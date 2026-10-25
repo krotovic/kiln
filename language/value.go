@@ -135,6 +135,9 @@ func (v Value) Payload() any {
 
 var null = Value{kind: Null}
 
+// NullValue is the null reference, for natives that answer no object.
+func NullValue() Value { return null }
+
 // Literal reads a value written as plain text, as value lists in content do: a number when the text is one,
 // "true" and "false" as bools, and a string otherwise. A number keeps its text, so "01" counts as 1 but is still
 // written "01" (into a string field, or joined to a string).
