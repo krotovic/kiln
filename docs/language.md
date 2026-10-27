@@ -704,10 +704,19 @@ export default class Bell implements Behaviour {
     setContextActive(context: InputContextRef, player: Player, active: boolean): void
     showUI(ui: UIRef, player: Player): void    // shows the player a UI (instance scripts; see below)
     hideUI(ui: UIRef, player: Player): void    // closes it, if it is open
+    play(anim: AnimationRef): void             // plays an animation on it, for everyone (instance scripts; see below)
+    playFor(anim: AnimationRef, player: Player): void  // for one player, camera track included
+    stopAnimation(): void; stopAnimationFor(player: Player): void
     prop(name: string): string                 // a prop of the prefab it comes from ("" for none; see below)
   }
   export native class UIRef { readonly id: string; with(name: string, value: string): UIRef }
   export native function ui(id: string): UIRef // a UI asset, such as "ui/shop"
+  export native class AnimationRef {
+    readonly id: string; readonly exists: boolean
+    readonly duration: number                  // seconds, at its speed (0 when the server hasn't it)
+    looping(): AnimationRef; speed(factor: number): AnimationRef  // 0.1 to 10
+  }
+  export native function animation(id: string): AnimationRef  // an animation asset, such as "animation/door-open"
   export native class ActionEvent {
     readonly action: string                    // the input definition's action ID, such as "interact"
     readonly context: string                   // the input context it was pressed in ("global": the zone's own)
@@ -725,7 +734,7 @@ export default class Bell implements Behaviour {
   ```
 
   An object's place (`x`, `y`, `h`, `rotation`) is where it is in the zone: its own transform composed with its
-  parents'. Scripts read the world but don't change it yet; they switch players' input contexts.
+  parents'. Scripts read the world but don't change it yet; they switch players' input contexts and play animations.
 - **Prefab props.** `ctx.object.prop(name)` reads a prop or computed prop, in its text form, of the prefab the object
   comes from: the nearest [prefab placement](architecture.md#prefabs) on its path (its own, or else its nearest
   parent's), or the spawn it is part of; `""` when there is none. A script's props inside a prefab can also be
@@ -779,6 +788,41 @@ export default class Bell implements Behaviour {
         log(event.player.name + " buys")
         event.handle()
       }
+    }
+  }
+  ```
+- **Animations.** `animation(id)` finds an [animation](architecture.md#animations) the server has (`exists`, and
+  `duration` in seconds, which `speed` divides; `looping()` plays it again from the start at its end).
+  `ctx.object.play(anim)` plays it on the object for everyone in the instance: players' browsers play it from the
+  server's tick, players who come later included, and it holds its end when it doesn't loop. Its changes' target
+  `""` is the object, and the others name objects below it. `playFor(anim, player)` plays it for one player alone
+  until they leave; its camera track takes their camera, and their controls rest until it ends (a camera track
+  played for everyone moves no one's camera). A new play on the object replaces what plays there for the same
+  audience, and `stopAnimation()` / `stopAnimationFor(player)` put it back at rest. They fail outside instance
+  scripts, on spawns, for an ID that isn't `animation/<slug>`, and for one the server doesn't have; for a player who
+  left meanwhile they do nothing. The server never works out a frame: a script that waits for the end counts the
+  duration.
+
+  ```ts
+  import { Behaviour, Context, ActionEvent, animation } from "game"
+
+  // A door that opens for everyone, and a scene at the gate for the player who rings, which opens it once over.
+  export default class Gate implements Behaviour {
+    private waiting = 0
+
+    onAction(ctx: Context, event: ActionEvent): void {
+      if (event.action == "interact") {
+        const scene = animation("animation/gate-arrival")
+        ctx.object.playFor(scene, event.player)
+        this.waiting = scene.duration
+        event.handle()
+      }
+    }
+
+    onUpdate(ctx: Context, dt: number): void {
+      if (this.waiting <= 0) { return }
+      this.waiting -= dt
+      if (this.waiting <= 0) { ctx.object.play(animation("animation/gate-open")) }
     }
   }
   ```
