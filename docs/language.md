@@ -638,7 +638,8 @@ export default class Herbs implements SpawnScript {
 - **Callbacks.** `onStart` and `onStop` are optional, as in a `Behaviour`; the object lives as long as its spawner
   is unchanged, so it may keep state between calls.
 - **Spawns' scripts.** A spawned prefab's Script components run on the server that owns the spawn, and read the
-  spawn's props with `ctx.object.prop(name)`.
+  spawn's props with `ctx.object.prop(name)`. They play animations on the spawn's objects with
+  `ctx.object.play(anim)` and `stopAnimation()`, on every scope (see [Script components](#script-components)).
 
 ### Script components
 
@@ -798,10 +799,13 @@ export default class Bell implements Behaviour {
   `""` is the object, and the others name objects below it. `playFor(anim, player)` plays it for one player alone
   until they leave; its camera track takes their camera, and their controls rest until it ends (a camera track
   played for everyone moves no one's camera). A new play on the object replaces what plays there for the same
-  audience, and `stopAnimation()` / `stopAnimationFor(player)` put it back at rest. They fail outside instance
-  scripts, on spawns, for an ID that isn't `animation/<slug>`, and for one the server doesn't have; for a player who
-  left meanwhile they do nothing. The server never works out a frame: a script that waits for the end counts the
-  duration.
+  audience, and `stopAnimation()` / `stopAnimationFor(player)` put it back at rest. On zone objects they work in
+  instance scripts only. A spawn's scripts play on its objects whatever server owns it (an instance, the fragment
+  or the World): the play becomes part of the spawn, travels down with it to every instance that shows it, and
+  plays for everyone who sees the spawn, newcomers included (a world spawn's survives a World restart); a spawn's
+  plays are everyone's, so `playFor` fails there. They fail in spawn scripts, for an ID that isn't
+  `animation/<slug>`, and for one the server doesn't have; for a player who left meanwhile they do nothing. The
+  server never works out a frame: a script that waits for the end counts the duration.
 
   ```ts
   import { Behaviour, Context, ActionEvent, animation } from "game"
