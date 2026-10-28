@@ -1,0 +1,190 @@
+# Script runtime
+
+Scripts compile to WebAssembly: one module per script, every module it imports and the checked budgets included,
+which the servers run with wazero and the browser with its own engine. The asset service compiles once, when a script
+is uploaded; nothing compiles at run time.
+
+## User perspective
+
+Players get scripts that behave the same on the servers and in their browser, at the speed of compiled code, and that
+can't stall or exhaust a server: a script runs in a sandbox of its own and stops when it uses up its budget.
+
+## Authoring perspective
+
+Content creators never see the runtime: they write scripts (see the [language reference](language-reference.md)) and
+the asset service compiles them on upload (see [Assets](assets.md#scripts)). Hosts (the game's servers, the browser)
+offer scripts their API as host modules: definition files in the language, such as `"game"` (see
+[Scripting](scripting.md)) and `"ui"` (see [UIs](uis.md#ui-scripts)). New engine APIs (IO, networking…) arrive as more
+definition files.
+
+## Technical details
+
+### Embedding (Go)
+
+```go
+host := &language.HostModule{
+	Name: "game",
+	Source: `
+export interface Behaviour { onUpdate?(ctx: Context, dt: number): void }
+export native class Context { readonly zone: string; hour(): number }
+export native function log(message: string): void`,
+	Natives: map[string]language.NativeFunc{
+		"log":          func(c *language.Call, _ language.Value, args []language.Value) (language.Value, error) { … },
+		"Context.zone": func(c *language.Call, this language.Value, _ []language.Value) (language.Value, error) {
+			return language.Str(this.Payload().(*myRunner).zone), nil
+		},
+		"Context.hour": …,
+	},
+}
+script, diags := language.CompileScript("script/door", source, language.ScriptOptions{Hosts: []*language.HostModule{host}})
+class, _ := script.DefaultClass()
+behaviour, _ := host.Interface("Behaviour")
+if why := class.Satisfies(behaviour); why != "" { … }
+inst, err := script.New(class, runner)          // runner is what natives get as Call.Data()
+_ = inst.Set("speed", language.Num(2))          // a public number, string or bool field
+ctx, _ := host.Object("Context", runner)        // a native class's object, with the host's payload
+_, err = inst.Call("onUpdate", ctx, language.Num(0.1))
+```
+
+- **Host modules** are how a host offers scripts its API. Each is a **definition file** in the language: only
+  interfaces, types, and `native` classes and functions, with no bodies or constants; their code is Go (`Natives`, by
+  `"f"`, `"C.method"` and `"C.field"`). Native fields are readonly; scripts can't make or extend a native class. A host
+  module is checked once, imports nothing, and must give every native it declares. Tools treat it like a module: its
+  declarations are where go to definition leads, and `Analyze(name, …)` reads it on its own (hover and the outline in
+  it).
+- **`CompileScript`** loads the entry module and everything it imports from a **`Source`** (`MapSource` for tests),
+  and returns the script or its `Diagnostic`s (`{Module, Line, Col, Msg}`, which carry what an editor's language server
+  needs). `ModuleImports(src)` lists a module's imports without checking it, so a host can find what depends on what.
+- **`*Script`** is immutable and safe to share between goroutines. `Script.Modules()` lists the modules it was compiled
+  from; `Script.Call` calls an exported function.
+- **`*Instance`** is an object the host keeps and calls into, under fresh budgets each call, with a module instance of
+  its own; it belongs to one goroutine at a time, and `Close` frees it. `FieldKind` and `Set` set its public number,
+  string and bool fields; `HasMethod` tells whether it has a method (an optional one, say). Run-time errors are
+  `*language.ScriptError`, which matches `language.ErrEval`.
+- **Values across the boundary.** Numbers, strings and bools cross as themselves, arrays and maps as copies, and
+  objects by reference: the host's native objects (`HostModule.Object`), which keep their identity in the script, and
+  the script's objects, which the host holds by handle. A script's object the host got (a result, a native's argument)
+  stays valid until its next call into the instance, unless it keeps it (`Instance.Keep`); `CallOn` calls one's
+  methods.
+- **Compiled modules.** `Script.Module()` is the script compiled to WebAssembly, its metadata included; the asset
+  service stores it. `LoadScript(module, opts)` loads one against the host modules it was compiled with and makes its
+  machine code, and refuses a module of another runtime version, or compiled against another definition file of a host
+  module (it records each one's hash), or whose natives the host doesn't give. `CompileScript` makes no machine code (it
+  checks the constants in wazero's interpreter); a script makes it when first instantiated. `Script.Close` frees it once
+  the script's last instance is closed.
+
+### Embedding (TypeScript)
+
+The browser runs compiled modules with `@alo/game/engine/language/index.js` (`game/src/engine/language`, without
+three.js), the same way:
+
+```ts
+import { hostObject, loadScript, NativeObject, type HostModule } from "@alo/game/engine/language/index.js";
+
+const ui: HostModule = {                // the game's is uiHost (game/src/game/ui-runner.ts)
+  name: "ui",
+  source: uiDefinitionFile,             // optional: checked against what the script was compiled with
+  natives: {
+    log: (call, _self, [line]) => console.log(line),
+    "Node.text": (_call, self) => (self as NativeObject).payload as string,
+  },
+};
+const script = await loadScript(await fetch(moduleUrl), { hosts: [ui] });
+const inst = script.new("default", data);   // the default class, data for natives (call.data)
+inst.set("speed", 2);
+inst.call("onUpdate", hostObject(ui, "Context", ctx), 0.1);
+```
+
+- `loadScript` compiles the module once (`WebAssembly.compileStreaming` for a fetch `Response`) and checks its metadata
+  against the host modules, as `LoadScript` does. `Script.new` and `Script.call` instantiate it.
+- `Instance` has the Go instance's methods: `call`, `callOn`, `hasMethod`, `hasMethodOn`, `fieldKind`, `set`, `get`,
+  `keep`, `selfObject`. Values are `number`, `string`, `boolean`, `null`, arrays, `Map`s, `ScriptObject`s and
+  `NativeObject`s (`hostObject`). A native that throws fails the script's call with `name: message`; errors are
+  `ScriptError {module, line, col, msg}`.
+- What the host does for a script it does as Go does (`go.ts`): numbers written in their shortest form (Go's
+  `'f', -1`), read as `strconv.ParseFloat` reads them, `%` of fractions, and strings quoted as `%q` quotes them in
+  messages. Everything else (Unicode, maps, the collector) is in the module itself.
+
+### Compiling to WebAssembly
+
+`CompileScript` checks a script, turns each function into a typed IR (`ir.go`: names already resolved to variables'
+slots, fields, constants and the functions calls run) and compiles the whole script, every module it imports included,
+into one WebAssembly module (`gen.go`, `gen_func.go`, `gen_builtins.go`), with only the runtime functions it uses
+(`runtime.wat`, assembled by `internal/engine/wasm`, which writes modules in the binary format and assembles a subset of
+the text format). The same sources always compile to the same bytes. `abi.go` is the interface between a module and
+its hosts (`host.go` in Go, `game/src/engine/language` in the browser); a change to it is a new `abiVersion`.
+
+- **Values.** Numbers are `f64`, bools `i32`, and strings, arrays, maps and objects `i32` addresses in the module's
+  memory, 0 for null.
+- **Memory.** Address 0 is null; 64 scratch slots of 8 bytes carry arguments and results between the script and its
+  host; static data follows (string literals, the classes' tables, Go's Unicode case table when the script changes
+  case), then the heap. Every block on the heap has a 16-byte header: its tag (the collector's mark in the high bit),
+  its size, a forwarding address, and a word of its own (a string's length in bytes, an array's length, a map's
+  count). Strings are UTF-8; arrays keep their elements in a store of 8-byte slots; maps keep their entries in
+  insertion order with an open-addressing index (FNV-1a over strings, the number's bits, `-0` as `0`); an object's
+  fields are 8-byte slots; a native object holds the host's handle.
+- **The collector** is a sliding mark-compact, run only between two calls from the host, so its roots are the handles
+  the host holds (the instance's object, what it kept, what the last call handed out) and the module's constants, never
+  the stack. It runs once the calls since the last collection allocated half of `MaxHeap`, and its live bytes are what
+  "keeps more than `MaxHeap`" measures. Native objects are held weakly: one the script let go of is dropped, and the
+  host told (`release`). Memory never shrinks, and grows to at most a little over three and a half times `MaxHeap`.
+- **Calls.** Functions are WebAssembly functions, methods take the object first. A method call on a class that no class
+  derived from it overrides is a direct call; the others, and calls and field reads through interfaces, go through one
+  function table, a row per name and signature with an entry per class.
+- **Budgets** are compiled in, from `ScriptLimits`: every statement and loop turn counts a step where it starts, every
+  call one more and a level of nesting, built-ins their length; allocations count against the call's bytes, lengths
+  and string sizes are checked where they grow. The host resets them per call (`__begin`, `__end`).
+- **Errors.** A run-time error writes its arguments into the scratch slots and calls the import `fail` with its code
+  and position, then traps. The module's metadata has the messages by code and the positions (module, line, column), so
+  both hosts word errors alike.
+- **Imports** (module `alo`): `fail`, `native` (a native by number, with `this` and its arguments in the scratch slots
+  and its result in slot 0), `fmt_num` (numbers that aren't whole or are past 2^53; the rest are written in the
+  module), `parse_num`, `fmod` (`%` of fractions; whole numbers are worked out in the module) and `release`. Hosts put
+  strings into the module through the export `__str_new`. Every script imports the same functions, so one wazero
+  runtime serves them all.
+- **Exports:** `memory`, `__init` (the module's constants, computed when it is instantiated; `CompileScript` runs it
+  once, so a constant that fails is a compile error), `__begin`, `__end`, `__gc`, the runtime's helpers for hosts
+  (`__str_new`, `__arr_new`, `__map_new`, `__map_put`, the handles' `__handle_new`, `__handle_get`, `__handle_drop`, and
+  `__native_new`, `__native_get`), and for the script: `n<class>` (a new object), `c<class>` (its constructor),
+  `m<class>.<method>` and `f.<function>`.
+- **Metadata,** in the custom section `alo.script` (JSON): the runtime version, the limits, the modules, the messages
+  and positions, every class (its fields with their offsets, its methods with their exports and signatures), the
+  natives it calls, the host modules with a hash of their definition files, the entry's exported functions and
+  classes.
+
+### Tests
+
+- `internal/engine/language`: the script cases of `testdata/scripts` (see
+  [the language's tests](language-reference.md#tests)), every one compiled to WebAssembly and run by wazero; instances
+  (the default class, `Satisfies`, `New`, fields set by kind, private fields not settable, `HasMethod`, calls with typed
+  arguments); an instance's kept memory bounded; one script shared by many goroutines; diagnostics collected across
+  functions; `ModuleImports`; a host module missing a native (`script_test.go`). The compiled runtime
+  (`compile_test.go`): the collector freeing garbage and cycles over many calls while what the object keeps survives;
+  kept objects surviving collections, objects not kept refused after the next call; natives taking and giving host
+  objects (the same object staying the same), arrays and maps; host objects the script let go of released; arrays and
+  maps as method arguments and results; numbers and strings as Go has them (`-0`, `%` of fractions and of whole
+  numbers, numbers past 2^53 and below 1, `num` with `_` and hex, `int`, `round`, case mapping with Go's rules, Unicode
+  spaces, runes in `len`, `slice` and `indexOf`, `split` on nothing); host strings with invalid UTF-8 read as Go reads
+  them; dispatch through interfaces and overrides, fields through interfaces; a constant that fails being a compile
+  error; a helper reporting its own trap, not an earlier call's error; a closed script making no instances while its
+  instances keep working, and its machine code freed with the last; `LoadScript` running a module, refusing one without
+  its host module, against a changed host module, of another runtime version or not a module; the same sources
+  compiling to the same bytes; errors naming their module, line and column. `bench_test.go` benchmarks a loop, method
+  calls and strings.
+- `internal/engine/wasm`: LEB128; a module written with the builder and the assembler (loops, labels, ifs with results,
+  globals, loads and stores, the table, data, a custom section) validated and run by wazero, a host function calling
+  back into the module; assembler errors (unknown locals, labels, instructions, functions and types, a function defined
+  twice).
+- **The browser's runtime runs the same cases:** `TestWriteBrowserFixtures` (only with `ALO_LANGUAGE_FIXTURES` set; the
+  game's `npm test` sets it through `scripts/language-fixtures.mjs`) compiles every case of `testdata/scripts` that
+  runs, and a few scripts for instances, into `game/src/engine/language/fixtures/` (not committed), with how Go formats,
+  parses and quotes a corpus of numbers and strings. So `npm test` needs Go.
+- `game/src/engine/language/script.test.ts`: the browser's runtime against the Go compiler's modules: every shared case
+  of `server/internal/engine/language/testdata/scripts` that runs (results, logs, errors); numbers written, read and
+  strings quoted exactly as Go does, over a corpus Go wrote; an instance with props, kinds, typed calls and its host's
+  natives; a module refused against a changed host module or without one; the collector keeping what is held and
+  refusing what wasn't kept, and "keeps more than" past the heap budget; natives with objects, arrays and maps,
+  released host objects; a timing bound.
+
+Automating: the client's build bundles only what its pages import, so to run the language runtime in the browser,
+start a Vite dev server and import it by path (see [Client engine](client-engine.md#tests)).
