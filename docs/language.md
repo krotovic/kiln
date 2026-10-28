@@ -34,6 +34,7 @@ modules).
 | Spawners' spawn scripts | Scripts, a `SpawnScript` | `"game"` | [Spawners](features/spawning.md#spawn-scripts) |
 | UIs | Scripts, a `UIController`, run in the browser | `"ui"` (`ui.d.als`) | [UIs](features/uis.md#ui-scripts) |
 | Animations played by scripts | `play`, `playFor` in scripts | `"game"` | [Animations](features/animations.md#playing-from-scripts) |
+| Effects played by scripts | `playEffect`, `playEffectFor` in scripts | `"game"` | [Effects](features/effects.md#playing-effects-from-scripts) |
 
 Scripts are assets (`script/<slug>`), compiled by the asset service on upload (see
 [Assets](features/assets.md#scripts)).
