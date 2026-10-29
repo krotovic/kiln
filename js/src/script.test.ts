@@ -2,7 +2,17 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { formatNumber, parseNumber, quote } from "./go.js";
-import { hostObject, loadScript, NativeObject, ScriptError, ScriptObject, type HostModule, type Value } from "./script.js";
+import {
+  hostObject,
+  loadScript,
+  NativeObject,
+  ScriptError,
+  ScriptObject,
+  type Call,
+  type HostModule,
+  type Resolver,
+  type Value,
+} from "./script.js";
 
 // The fixtures are the Go compiler's: the shared cases (server/internal/engine/language/testdata/scripts) compiled to
 // WebAssembly, and how Go formats and parses numbers (scripts/language-fixtures.mjs writes them before the tests).
@@ -25,14 +35,33 @@ function float(bits: string): number {
   return view.getFloat64(0);
 }
 
+/** What a case's natives get, as script_test.go's caseData: what it logs, and the promises to settle in order */
+interface CaseData {
+  logs: string[];
+  pending: (() => void)[];
+}
+
+/** A native's promise that the harness settles with settle once main returned */
+function later(call: Call, settle: (r: Resolver) => void): Value {
+  const [p, r] = call.newPromise();
+  (call.data as CaseData).pending.push(() => settle(r));
+  return p;
+}
+
 /** The cases' "test" host module, as script_test.go has it */
 const testHost: HostModule = {
   name: "test",
   source: fixtures.hosts.test,
   natives: {
     log: (call, _self, [message]) => {
-      (call.data as string[] | undefined)?.push(message as string);
+      const data = call.data as CaseData | string[] | undefined;
+      if (Array.isArray(data)) data.push(message as string);
+      else data?.logs.push(message as string);
     },
+    later: (call, _self, [v]) => later(call, (r) => r.resolve(v)),
+    laterText: (call, _self, [s]) => later(call, (r) => r.resolve(s)),
+    failLater: (call, _self, [code]) => later(call, (r) => r.reject(hostObject(testHost, "ProbeError", code))),
+    "ProbeError.code": (_call, self) => (self as NativeObject).payload as string,
     probe: (_call, _self, [name]) => hostObject(testHost, "Probe", name),
     "Probe.name": (_call, self) => (self as NativeObject).payload as string,
     "Probe.twice": (_call, _self, [n]) => {
@@ -57,11 +86,14 @@ function show(v: Value): string {
 for (const c of fixtures.cases) {
   test(`case ${c.name}`, async () => {
     const script = await loadScript(moduleBytes(c.module), { hosts: [testHost] });
-    const logs: string[] = [];
+    const data: CaseData = { logs: [], pending: [] };
+    const logs = data.logs;
     let got: Value = null;
     let err: unknown = null;
     try {
-      got = script.call("main", logs);
+      got = script.call("main", data);
+      // then the promises its natives made, in order, as they are made
+      while (data.pending.length > 0) data.pending.shift()!();
     } catch (e) {
       err = e;
     }

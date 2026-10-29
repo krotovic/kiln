@@ -6,7 +6,16 @@
 import { formatMessage, formatNumber, parseNumber, quote } from "./go.js";
 
 /** A value crossing between the host and a script */
-export type Value = number | string | boolean | null | Value[] | Map<number | string, Value> | ScriptObject | NativeObject;
+export type Value =
+  | number
+  | string
+  | boolean
+  | null
+  | Value[]
+  | Map<number | string, Value>
+  | ScriptObject
+  | NativeObject
+  | ScriptPromise;
 
 /** A native function, method ("C.m") or field ("C.f") of a host module; self is the object for a method or field */
 export type NativeFunc = (call: Call, self: Value, args: Value[]) => Value | void;
@@ -15,7 +24,15 @@ export type NativeFunc = (call: Call, self: Value, args: Value[]) => Value | voi
 export interface Call {
   /** What the host gave the instance (Script.new) or Script.call this call came from */
   readonly data: unknown;
+  /**
+   * Makes a pending promise for the native's result, which must be a Promise: the native returns the promise and
+   * keeps the resolver to settle it later. It throws when the instance has MAX_PENDING_PROMISES already.
+   */
+  newPromise(): [ScriptPromise, Resolver];
 }
+
+/** The most promises an instance's natives made that the host hasn't settled yet */
+export const MAX_PENDING_PROMISES = 64;
 
 /**
  * A module the host offers scripts, by its name (such as "ui"), with its natives. Its definition file (source),
@@ -54,6 +71,41 @@ export class ScriptObject {
   }
 }
 
+/** A promise a native made, as the script gets it */
+export class ScriptPromise {
+  constructor(readonly resolver: Resolver) {}
+}
+
+/**
+ * Settles a promise a native made (Call.newPromise). resolve and reject run, under fresh budgets, what waited for
+ * it, so they are calls into the instance: they must come between its other calls, never from a native. A promise
+ * settles once; settling it again does nothing.
+ */
+export class Resolver {
+  /** @internal */
+  constructor(
+    /** @internal */ readonly instance: Instance,
+    /** @internal */ public handle: number,
+    /** @internal */ readonly value: TypeMeta,
+    /** @internal */ readonly err: TypeMeta | undefined,
+  ) {}
+
+  /** Whether the promise hasn't settled */
+  get pending(): boolean {
+    return this.handle !== 0;
+  }
+
+  /** Fulfils the promise with v, a value of its type (anything for a Promise<void>); throws the script's error */
+  resolve(v: Value): void {
+    this.instance.settle(this, v, false);
+  }
+
+  /** Fails the promise with e, an object of its error class; throws the script's error */
+  reject(e: NativeObject): void {
+    this.instance.settle(this, e, true);
+  }
+}
+
 /** An error while a script runs, naming where; or a compiled script that can't be loaded */
 export class ScriptError extends Error {
   constructor(
@@ -68,7 +120,7 @@ export class ScriptError extends Error {
 
 // ---- the interface, as abi.go has it ----
 
-const ABI_VERSION = 1;
+const ABI_VERSION = 2;
 const META_SECTION = "alo.script";
 const SCRATCH = 16;
 const HEADER = 16;
@@ -79,12 +131,19 @@ const MAP_STR_KEYS = 1;
 const MAP_REF_VALS = 2;
 
 interface TypeMeta {
-  k: "n" | "s" | "b" | "v" | "a" | "m" | "c" | "i";
+  k: "n" | "s" | "b" | "v" | "a" | "m" | "c" | "i" | "p";
   e?: TypeMeta;
   key?: TypeMeta;
   c?: number;
+  /** A promise's error class */
+  err?: TypeMeta;
   name: string;
 }
+
+// The kinds of promises the runtime makes (gen_async.go)
+const PROMISE_VALUE = 0;
+const PROMISE_STRING = 1;
+const PROMISE_REF = 2;
 
 interface FieldMeta {
   name: string;
@@ -261,6 +320,8 @@ function fits(v: Value, t: TypeMeta): boolean {
     case "c":
     case "i":
       return v === null || v instanceof ScriptObject || v instanceof NativeObject;
+    case "p":
+      return v instanceof ScriptPromise;
   }
   return true;
 }
@@ -293,6 +354,8 @@ export class Instance {
   private natFree: number[] = [];
   private natNext = 1;
   private classIndices = new Map<string, number>();
+  /** The promises natives made that the host hasn't settled yet */
+  private pending = 0;
 
   /** @internal */
   constructor(
@@ -563,6 +626,11 @@ export class Instance {
       }
       return p;
     }
+    if (v instanceof ScriptPromise) {
+      const r = v.resolver;
+      if (r.instance !== this || r.handle === 0) throw new Error("a promise of another instance, or one settled already");
+      return this.ex.__handle_get(r.handle) >>> 0;
+    }
     if (v instanceof ScriptObject) {
       if (v.instance !== this) throw new Error("an object of another instance of the script");
       if (!this.live.has(v.handle)) throw new Error("an object of the script from an earlier call, which the host didn't keep");
@@ -590,6 +658,8 @@ export class Instance {
       case "s":
         return this.readString(raw >>> 0);
       case "v":
+      case "p":
+        // the host doesn't hold the script's promises: an async method's promise is ignored
         return null;
     }
     const p = raw >>> 0;
@@ -633,6 +703,56 @@ export class Instance {
       this.natObjs.delete(nh);
       this.natFree.push(nh);
     }
+  }
+
+  // ---- promises natives make ----
+
+  private newPromise(result: TypeMeta): [ScriptPromise, Resolver] {
+    if (result.k !== "p") throw new Error("only a native that returns a Promise makes one");
+    if (this.pending >= MAX_PENDING_PROMISES) {
+      throw new Error(`more than ${MAX_PENDING_PROMISES} promises are waiting for the host`);
+    }
+    const e = result.e!;
+    const kind = e.k === "s" ? PROMISE_STRING : isRef(e) && e.k !== "v" ? PROMISE_REF : PROMISE_VALUE;
+    const p = this.ex.__promise_new(kind) >>> 0;
+    const h = this.ex.__handle_new(p);
+    this.pending++;
+    const r = new Resolver(this, h, e, result.err);
+    return [new ScriptPromise(r), r];
+  }
+
+  /** @internal Settles r's promise with v (or, rejecting, the error e), as one call from the host */
+  settle(r: Resolver, v: Value, reject: boolean): void {
+    if (r.handle === 0) return;
+    let exportName = "__promise_resolve_i";
+    let type = r.value;
+    if (reject) {
+      if (!r.err) throw new Error("the promise can't fail");
+      const cls = v instanceof NativeObject ? this.classIndices.get(v.host.name + ":" + v.className) : undefined;
+      if (cls !== r.err.c) throw new Error(`a ${kindOf(v)} is no ${r.err.name}`);
+      exportName = "__promise_reject";
+      type = r.err;
+    } else if (r.value.k !== "v") {
+      if (!fits(v, r.value)) throw new Error(`a ${kindOf(v)} is no ${r.value.name}`);
+      if (r.value.k === "n") exportName = "__promise_resolve_f";
+    }
+    this.begin();
+    // A value that can't go into the script gives the promise up: it never settles, and no longer counts as pending
+    let raw = 0;
+    let failure: unknown = null;
+    try {
+      raw = !reject && r.value.k === "v" ? 0 : this.run(() => this.toWasm(v, type));
+    } catch (err) {
+      failure = err;
+    }
+    const p = this.ex.__handle_get(r.handle) >>> 0;
+    this.ex.__handle_drop(r.handle);
+    r.handle = 0;
+    this.pending--;
+    if (failure) throw failure;
+    this.dropTemps();
+    this.run(() => this.ex[exportName](p, raw));
+    this.end();
   }
 
   /** How many host objects the instance holds for the script (tests) */
@@ -679,8 +799,9 @@ export class Instance {
     }
     const args = params.map((p, i) => this.fromWasm(raw[i], p));
     let out: Value | void;
+    const call: Call = { data: this.data, newPromise: () => this.newPromise(nm.result) };
     try {
-      out = s.natives[id]({ data: this.data }, self, args);
+      out = s.natives[id](call, self, args);
     } catch (e) {
       if (e instanceof ScriptError) throw e;
       throw s.errorAt(pos, `${member}: ${String((e as Error)?.message ?? e)}`);

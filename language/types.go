@@ -17,14 +17,15 @@ const (
 	tMap
 	tClass
 	tIface
+	tPromise // a Promise<T> (elem), or Promise<T, E> (key: the error class)
 )
 
 // Type is a script type. Primitive and null types are shared values; arrays and maps are compared by structure,
 // classes and interfaces by declaration.
 type Type struct {
 	kind  typeKind
-	elem  *Type // arrays' elements, maps' values
-	key   *Type // maps' keys
+	elem  *Type // arrays' elements, maps' values, promises' values
+	key   *Type // maps' keys, promises' errors (nil: it can't fail)
 	class *classInfo
 	iface *ifaceInfo
 }
@@ -38,10 +39,11 @@ var (
 	typNull    = &Type{kind: tNull}
 )
 
-func arrayOf(t *Type) *Type     { return &Type{kind: tArray, elem: t} }
-func mapOf(k, v *Type) *Type    { return &Type{kind: tMap, key: k, elem: v} }
-func (t *Type) isRef() bool     { return t.kind >= tArray }
-func (t *Type) primitive() bool { return t.kind == tNumber || t.kind == tString || t.kind == tBool }
+func arrayOf(t *Type) *Type      { return &Type{kind: tArray, elem: t} }
+func mapOf(k, v *Type) *Type     { return &Type{kind: tMap, key: k, elem: v} }
+func promiseOf(v, e *Type) *Type { return &Type{kind: tPromise, elem: v, key: e} }
+func (t *Type) isRef() bool      { return t.kind >= tArray }
+func (t *Type) primitive() bool  { return t.kind == tNumber || t.kind == tString || t.kind == tBool }
 
 func (t *Type) String() string {
 	switch t.kind {
@@ -63,9 +65,17 @@ func (t *Type) String() string {
 		return t.class.name
 	case tIface:
 		return t.iface.name
+	case tPromise:
+		if t.key != nil {
+			return "Promise<" + t.elem.String() + ", " + t.key.String() + ">"
+		}
+		return "Promise<" + t.elem.String() + ">"
 	}
 	return "?"
 }
+
+// isErrorClass reports whether t is an error class, which promises fail with.
+func (t *Type) isErrorClass() bool { return t.kind == tClass && t.class.isError }
 
 // kind is the Value kind a value of the type has (null aside).
 func (t *Type) valueKind() Kind {
@@ -80,7 +90,7 @@ func (t *Type) valueKind() Kind {
 		return Array
 	case tMap:
 		return Map
-	case tClass, tIface:
+	case tClass, tIface, tPromise:
 		return Object
 	}
 	return 0
@@ -115,12 +125,18 @@ func identical(a, b *Type) bool {
 		return a.class == b.class
 	case tIface:
 		return a.iface == b.iface
+	case tPromise:
+		if (a.key == nil) != (b.key == nil) {
+			return false
+		}
+		return identical(a.elem, b.elem) && (a.key == nil || identical(a.key, b.key))
 	}
 	return true
 }
 
 // assignable reports whether a value of type from may go where a to is expected: the same type, null into a
-// reference, a class into its base classes, and a class or interface into an interface it satisfies.
+// reference, a class into its base classes, a class or interface into an interface it satisfies, and a promise
+// that can't fail where one of the same value may fail.
 func assignable(from, to *Type) bool {
 	if from.kind == tInvalid || to.kind == tInvalid || identical(from, to) {
 		return true
@@ -140,6 +156,10 @@ func assignable(from, to *Type) bool {
 		if from.kind == tIface {
 			return ifaceSatisfies(from.iface, to.iface) == ""
 		}
+	case tPromise:
+		if from.kind == tPromise && from.key == nil && to.key != nil {
+			return identical(from.elem, to.elem)
+		}
 	}
 	return false
 }
@@ -152,6 +172,8 @@ type classInfo struct {
 	pos         int
 	decl        *classDecl
 	native      bool
+	isError     bool // an error class: what a Promise<T, E> fails with
+	hidden      bool // one the compiler makes: a promise, or an async function's frame
 	super       *classInfo
 	fields      []*fieldInfo
 	fieldByName map[string]*fieldInfo
@@ -201,6 +223,7 @@ type funcInfo struct {
 	owner    *classInfo // methods and constructors
 	private  bool
 	optional bool // an interface's optional method
+	async    bool // returns a promise its body settles, and may await
 }
 
 func (f *funcInfo) sameSignature(g *funcInfo) bool {
@@ -290,7 +313,7 @@ func satisfiesBy(i *ifaceInfo, get func(name string) (member, bool)) string {
 			if cm.private {
 				return name + " is private"
 			}
-			if cm.canon != canonSig(m) {
+			if cm.canon != canonSig(m) && !(m.optional && asyncForVoid(cm.canon, canonSig(m))) {
 				return name + " is " + cm.text + ", not " + m.signature()
 			}
 			continue
@@ -344,4 +367,16 @@ func ifaceSatisfies(a, b *ifaceInfo) string {
 		}
 	}
 	return ""
+}
+
+// asyncForVoid reports whether a method of signature have (canonSig) may stand for an optional method of
+// signature want that returns nothing: the same parameters, returning a Promise<void> (which may fail), as an
+// async method does. The host that calls it ignores the promise.
+func asyncForVoid(have, want string) bool {
+	params, ok := strings.CutSuffix(want, ": void")
+	if !ok {
+		return false
+	}
+	rest, ok := strings.CutPrefix(have, params+": Promise<void")
+	return ok && (rest == ">" || strings.HasPrefix(rest, ", "))
 }

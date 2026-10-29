@@ -356,6 +356,9 @@ type Instance struct {
 	natIdx  map[*object]int32
 	natFree []int32
 	natNext int32
+
+	// pending are the promises natives made that the host hasn't settled yet
+	pending int
 }
 
 // scriptRef is a script's object the host holds, by its handle in its instance.
@@ -797,6 +800,9 @@ func (in *Instance) newString(s string) (uint32, error) {
 
 func fitsMeta(v Value, t typeMeta) bool {
 	switch t.K {
+	case "p":
+		_, ok := v.ref.(*promiseRef)
+		return ok
 	case "n":
 		return v.kind == Number
 	case "s":
@@ -894,6 +900,12 @@ func (in *Instance) toWasm(v Value, t typeMeta) (uint64, error) {
 		return uint64(uint32(p)), nil
 	}
 	switch r := v.ref.(type) {
+	case *promiseRef:
+		if r.res.in != in || r.res.handle == 0 {
+			return 0, errors.New("a promise of another instance, or one settled already")
+		}
+		p, err := in.helper("__handle_get", uint64(r.res.handle))
+		return uint64(uint32(p)), err
 	case *scriptRef:
 		if r.in != in {
 			return 0, errors.New("an object of another instance of the script")
@@ -951,7 +963,8 @@ func (in *Instance) fromWasm(raw uint64, t typeMeta) (Value, error) {
 		return Boolean(uint32(raw) != 0), nil
 	case "s":
 		return Str(in.readString(uint32(raw))), nil
-	case "v":
+	case "v", "p":
+		// the host doesn't hold the script's promises: an async method's promise is ignored
 		return Value{}, nil
 	}
 	p := uint32(raw)
@@ -1076,7 +1089,7 @@ func (in *Instance) native(id int, pos int32) error {
 		}
 		args[i] = v
 	}
-	out, err := s.natives[id](&Call{data: in.data}, this, args)
+	out, err := s.natives[id](&Call{data: in.data, in: in, result: nm.Result}, this, args)
 	if err != nil {
 		var se *ScriptError
 		if errors.As(err, &se) {
@@ -1096,4 +1109,116 @@ func (in *Instance) native(id int, pos int32) error {
 	}
 	in.writeSlot(scratchBase, r, nm.Result)
 	return nil
+}
+
+// ---- promises natives make ----
+
+// MaxPendingPromises bounds the promises an instance's natives made that the host hasn't settled yet.
+const MaxPendingPromises = 64
+
+// promiseRef is a promise a native made, as the script gets it.
+type promiseRef struct{ res *Resolver }
+
+// Resolver settles a promise a native made (Call.NewPromise). Resolve and Reject run, under fresh budgets, what
+// waited for it, so they are calls into the instance: they must come from the goroutine that uses it, between its
+// other calls. A promise settles once; settling it again, or after the instance closed, does nothing.
+type Resolver struct {
+	in     *Instance
+	handle int32 // 0 once it settled
+	value  typeMeta
+	err    *typeMeta
+}
+
+// NewPromise makes a pending promise for the native's result, which must be a Promise: the native returns the
+// promise and keeps the resolver to settle it later. It fails when the instance has MaxPendingPromises already.
+func (c *Call) NewPromise() (Value, *Resolver, error) {
+	in := c.in
+	if in == nil || c.result.K != "p" {
+		return Value{}, nil, errors.New("only a native that returns a Promise makes one")
+	}
+	if in.pending >= MaxPendingPromises {
+		return Value{}, nil, fmt.Errorf("more than %d promises are waiting for the host", MaxPendingPromises)
+	}
+	kind := promiseKindValue
+	switch {
+	case c.result.E.K == "s":
+		kind = promiseKindString
+	case isRefMeta(c.result.E) && c.result.E.K != "v":
+		kind = promiseKindRef
+	}
+	p, err := in.helper("__promise_new", uint64(kind))
+	if err != nil {
+		return Value{}, nil, err
+	}
+	h, err := in.helper("__handle_new", uint64(uint32(p)))
+	if err != nil {
+		return Value{}, nil, err
+	}
+	in.pending++
+	r := &Resolver{in: in, handle: h, value: *c.result.E, err: c.result.Err}
+	return Value{kind: Object, ref: &promiseRef{res: r}}, r, nil
+}
+
+// Pending reports whether the promise hasn't settled.
+func (r *Resolver) Pending() bool { return r.handle != 0 && r.in.mod != nil }
+
+// Resolve fulfils the promise with v, a value of its type (anything for a Promise<void>), and runs what waited
+// for it. The error is the script's, when what ran failed.
+func (r *Resolver) Resolve(v Value) error {
+	if !r.Pending() {
+		return nil
+	}
+	if r.value.K == "v" {
+		return r.settle("__promise_resolve_i", func() (uint64, error) { return 0, nil })
+	}
+	if !fitsMeta(v, r.value) {
+		return fmt.Errorf("a %s is no %s", v.Kind(), r.value.Name)
+	}
+	export := "__promise_resolve_i"
+	if r.value.K == "n" {
+		export = "__promise_resolve_f"
+	}
+	return r.settle(export, func() (uint64, error) { return r.in.toWasm(v, r.value) })
+}
+
+// Reject fails the promise with e, an object of its error class, and runs what waited for it.
+func (r *Resolver) Reject(e Value) error {
+	if !r.Pending() {
+		return nil
+	}
+	if r.err == nil {
+		return errors.New("the promise can't fail")
+	}
+	obj, ok := e.ref.(*object)
+	if !ok || e.kind != Object {
+		return fmt.Errorf("a %s is no %s", e.Kind(), r.err.Name)
+	}
+	if cls, ok := r.in.script.classIndex[obj.class]; !ok || cls != r.err.C {
+		return fmt.Errorf("a %s is no %s", obj.class.name, r.err.Name)
+	}
+	return r.settle("__promise_reject", func() (uint64, error) { return r.in.toWasm(e, *r.err) })
+}
+
+// settle calls the runtime's export with the promise and the value value gives, as one call from the host. A
+// value that can't go into the script gives the promise up: it never settles, and no longer counts as pending.
+func (r *Resolver) settle(export string, value func() (uint64, error)) error {
+	in := r.in
+	in.begin()
+	raw, verr := value()
+	p, err := in.helper("__handle_get", uint64(r.handle))
+	_, _ = in.helper("__handle_drop", uint64(r.handle))
+	r.handle = 0
+	in.pending--
+	if verr != nil {
+		return verr
+	}
+	if err != nil {
+		return err
+	}
+	in.stack[0], in.stack[1] = uint64(uint32(p)), raw
+	in.dropTemps()
+	if err := in.callExport(export, 2); err != nil {
+		return err
+	}
+	return in.end()
 }

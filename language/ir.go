@@ -136,6 +136,12 @@ type (
 		args  []irExpr
 		pos   int
 	}
+	// irAwaited is what the promise of the irAwait it is assigned in settled with: its value, or with err its
+	// error (null when it was fulfilled).
+	irAwaited struct {
+		irBase
+		err bool
+	}
 )
 
 func (e *irNum) typeOf() *Type   { return typNumber }
@@ -198,9 +204,22 @@ type (
 	}
 	irBreak    struct{}
 	irContinue struct{}
-	irReturn   struct {
-		value irExpr
-		pos   int
+	// irReturn returns from a function; in an async one it settles the function's promise: it fulfils it with the
+	// value, or rejects it with an error (reject).
+	irReturn struct {
+		value  irExpr
+		reject bool
+		pos    int
+	}
+	// irAwait waits, in an async function, for a promise (t its value's type, e its error class, nil when it can't
+	// fail), then sets val to its value and err to its error (nil drops them). ret is return await: the function's
+	// own promise settles as this one did.
+	irAwait struct {
+		promise  irExpr
+		t, e     *Type
+		val, err *irTarget
+		ret      bool
+		pos      int
 	}
 	// irSuperCall runs the base class's constructor on this.
 	irSuperCall struct {
@@ -223,6 +242,7 @@ func (*irForOf) irStmt()      {}
 func (*irBreak) irStmt()      {}
 func (*irContinue) irStmt()   {}
 func (*irReturn) irStmt()     {}
+func (*irAwait) irStmt()      {}
 func (*irSuperCall) irStmt()  {}
 func (*irFieldInits) irStmt() {}
 func (*irNop) irStmt()        {}

@@ -92,3 +92,23 @@ export function f(x: number): number {
   y = - -1
   return + +y
 }
+
+=== async functions, awaits and error classes
+-- in --
+export error class ShopError{code:string=""}
+async function buy(n:number):Promise<number,ShopError>{
+const [v,err]=await later(n)
+[v,err]=await later(n)
+const s=await(text())
+if(err!=null){return err}
+return v
+}
+-- want --
+export error class ShopError { code: string = "" }
+async function buy(n: number): Promise<number, ShopError> {
+  const [v, err] = await later(n)
+  [v, err] = await later(n)
+  const s = await (text())
+  if (err != null) { return err }
+  return v
+}

@@ -166,6 +166,18 @@ func (p *parser) add() (node, error) { return p.binaryLevel(p.mul, "+", "-") }
 func (p *parser) mul() (node, error) { return p.binaryLevel(p.unary, "*", "/", "%") }
 
 func (p *parser) unary() (node, error) {
+	if p.script && p.isWord("await") {
+		t := p.next()
+		if err := p.enter(t.pos); err != nil {
+			return nil, err
+		}
+		defer p.leave()
+		x, err := p.unary()
+		if err != nil {
+			return nil, err
+		}
+		return &awaitNode{scriptExpr{t.pos}, x}, p.count(t.pos)
+	}
 	if !p.isOp("-", "!") {
 		if p.script {
 			return p.postfix()
@@ -302,7 +314,7 @@ func (p *parser) list(closing string) ([]node, error) {
 	return items, nil
 }
 
-// postfix parses a primary followed by any number of .name, .name(args) and [index].
+// postfix parses a primary followed by any number of .name, .name(args) and [index] (the [ on the same line).
 func (p *parser) postfix() (node, error) {
 	x, err := p.primary()
 	if err != nil {
@@ -330,7 +342,8 @@ func (p *parser) postfix() (node, error) {
 			} else {
 				x = &memberNode{scriptExpr{name.pos}, x, name.text}
 			}
-		case p.isOp("["):
+		case p.isOp("[") && !p.peek().nl:
+			// a [ that starts a line starts a statement ([v, err] = await p), not an index
 			open := p.next()
 			if err := p.enter(open.pos); err != nil {
 				return nil, err

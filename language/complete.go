@@ -70,8 +70,8 @@ func (p *probe) ref(label string, r Ref) {
 
 var (
 	valueKeywords     = []string{"null", "true", "false", "new"}
-	statementKeywords = []string{"let", "const", "if", "else", "while", "for", "return", "break", "continue"}
-	topKeywords       = []string{"import", "export", "class", "interface", "type", "function", "const"}
+	statementKeywords = []string{"let", "const", "if", "else", "while", "for", "return", "break", "continue", "await"}
+	topKeywords       = []string{"import", "export", "class", "interface", "type", "function", "const", "async", "error"}
 )
 
 // names lists what a name can be where the probe stands: the variables in scope (innermost first), the module's

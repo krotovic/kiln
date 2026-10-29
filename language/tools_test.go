@@ -247,7 +247,7 @@ func TestHostModulesAreDefinitionFiles(t *testing.T) {
 	for _, s := range a.Symbols("test") {
 		names = append(names, s.Name)
 	}
-	if strings.Join(names, ",") != "log,probe,Probe,Greeter" {
+	if strings.Join(names, ",") != "log,probe,Probe,Greeter,Hooks,ProbeError,later,laterText,failLater" {
 		t.Fatalf("outline = %v", names)
 	}
 	// Anything but declarations is refused

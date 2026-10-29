@@ -1,0 +1,453 @@
+Async functions, awaits and promises. The harness settles the promises later, laterText and failLater make once
+main returns, in the order they were made.
+
+=== an async function that doesn't wait settles its promise at once, and awaiting it goes on at once
+-- script/main --
+import { log } from "test"
+async function two(): Promise<number> { return 2 }
+async function run(): Promise<void> {
+  const x = await two()
+  log("got " + str(x))
+}
+export function main(): number {
+  run()
+  log("after run")
+  return 1
+}
+-- want --
+1
+-- logs --
+got 2
+after run
+
+=== awaits wait for the host, and go on in the order their promises settle
+-- script/main --
+import { log, later } from "test"
+async function wait(name: string, v: number): Promise<void> {
+  log(name + " waits")
+  const [x, err] = await later(v)
+  log(name + " got " + str(x) + " " + str(err == null))
+}
+export function main(): number {
+  wait("a", 1)
+  wait("b", 2)
+  log("main ends")
+  return 0
+}
+-- logs --
+a waits
+b waits
+main ends
+a got 1 true
+b got 2 true
+
+=== an error is a value: the host's, passed on, and taken apart
+-- script/main --
+import { log, failLater, ProbeError } from "test"
+async function load(): Promise<number, ProbeError> {
+  const [x, err] = await failLater("empty")
+  if (err != null) {
+    return err
+  }
+  return x
+}
+async function run(): Promise<void> {
+  const [v, err] = await load()
+  log(str(v) + " " + err.code)
+}
+export function main(): number {
+  run()
+  return 0
+}
+-- logs --
+0 empty
+
+=== a script's own error class, and a subclass of it
+-- script/main --
+import { log, later } from "test"
+error class ShopError {
+  code: string
+  constructor(code: string) { this.code = code }
+}
+error class Closed extends ShopError {
+  constructor() { super("closed") }
+}
+async function buy(gold: number): Promise<string, ShopError> {
+  const [have, _] = await later(gold)
+  if (have < 0) {
+    return new Closed()
+  }
+  if (have < 10) {
+    return new ShopError("poor")
+  }
+  return "sword"
+}
+async function run(): Promise<void> {
+  const [a, e1] = await buy(5)
+  log(a + "|" + e1.code)
+  const [b, e2] = await buy(20)
+  log(b + "|" + str(e2 == null))
+  const [c, e3] = await buy(-1)
+  log(c + "|" + e3.code)
+}
+export function main(): number {
+  run()
+  return 0
+}
+-- logs --
+|poor
+sword|true
+|closed
+
+=== loops keep their variables across awaits: for … of with continue and break, and while
+-- script/main --
+import { log, later } from "test"
+async function sum(xs: number[]): Promise<number> {
+  let total = 0
+  for (const x of xs) {
+    if (x < 0) {
+      continue
+    }
+    const [v, _] = await later(x)
+    total += v
+    if (total > 10) {
+      break
+    }
+  }
+  return total
+}
+async function count(n: number): Promise<number> {
+  let i = 0
+  let s = ""
+  while (i < n) {
+    const [v, _] = await later(i)
+    s += str(v)
+    i++
+  }
+  log(s)
+  return i
+}
+async function run(): Promise<void> {
+  const total = await sum([1, -5, 2, 3, 20, 4])
+  log("total " + str(total))
+  const n = await count(4)
+  log("count " + str(n))
+}
+export function main(): number {
+  run()
+  return 0
+}
+-- logs --
+total 26
+0123
+count 4
+
+=== branches with awaits in both, nested in a loop
+-- script/main --
+import { log, later, laterText } from "test"
+async function run(): Promise<void> {
+  for (let i = 0; i < 3; i++) {
+    if (i % 2 == 0) {
+      const [v, _] = await later(i * 10)
+      log("even " + str(v))
+    } else {
+      const s = await laterText("odd")
+      log(s + " " + str(i))
+    }
+  }
+}
+export function main(): number {
+  run()
+  return 0
+}
+-- logs --
+even 0
+odd 1
+even 20
+
+=== async methods keep this, and return await passes a promise's outcome on
+-- script/main --
+import { log, later, failLater, ProbeError } from "test"
+class Counter {
+  n = 0
+  async add(v: number): Promise<number, ProbeError> {
+    const [x, err] = await later(v)
+    if (err != null) {
+      return err
+    }
+    this.n += x
+    return this.n
+  }
+  async broken(): Promise<number, ProbeError> {
+    return await failLater("broken")
+  }
+}
+async function run(): Promise<void> {
+  const c = new Counter()
+  const [a, _] = await c.add(2)
+  const [b, _e] = await c.add(3)
+  log(str(a) + " " + str(b) + " " + str(c.n))
+  const [x, err] = await c.broken()
+  log(str(x) + " " + err.code)
+}
+export function main(): number {
+  run()
+  return 0
+}
+-- logs --
+2 5 5
+0 broken
+
+=== assignments take what an await gives
+-- script/main --
+import { log, later, laterText, ProbeError } from "test"
+class Box {
+  text = ""
+  n = 0
+  err: ProbeError = null
+}
+async function run(): Promise<void> {
+  const b = new Box()
+  b.text = await laterText("hi")
+  [b.n, b.err] = await later(7)
+  log(b.text + " " + str(b.n) + " " + str(b.err == null))
+}
+export function main(): number {
+  run()
+  return 0
+}
+-- logs --
+hi 7 true
+
+=== a promise kept in a field, awaited twice, and awaited after it settled
+-- script/main --
+import { log, laterText } from "test"
+class Holder {
+  p: Promise<string> = null
+}
+async function first(h: Holder): Promise<void> {
+  const s = await h.p
+  log("first " + s)
+}
+async function second(h: Holder): Promise<void> {
+  const s = await h.p
+  log("second " + s)
+  const again = await h.p
+  log("again " + again)
+}
+export function main(): number {
+  const h = new Holder()
+  h.p = laterText("x")
+  first(h)
+  second(h)
+  return 0
+}
+-- logs --
+first x
+second x
+again x
+
+=== a promise that can't fail goes where one may fail
+-- script/main --
+import { log, ProbeError } from "test"
+async function one(): Promise<number> { return 1 }
+function pass(): Promise<number, ProbeError> { return one() }
+async function run(): Promise<void> {
+  const [v, err] = await pass()
+  log(str(v) + " " + str(err == null))
+}
+export function main(): number {
+  run()
+  return 0
+}
+-- logs --
+1 true
+
+=== an async method stands for an optional method the host calls
+-- script/main --
+import { log, later, Hooks } from "test"
+class H implements Hooks {
+  async ready(): Promise<void> {
+    await later(1)
+    log("ready")
+  }
+  run(): void {}
+}
+export function main(): number {
+  const h = new H()
+  h.ready()
+  return 0
+}
+-- logs --
+ready
+
+=== a failure after an await fails the call that resumed it
+-- script/main --
+import { later } from "test"
+async function boom(): Promise<void> {
+  const [x, _] = await later(0)
+  const y = 1 / x
+}
+export function main(): number {
+  boom()
+  return 0
+}
+-- eval error --
+division by zero
+
+=== awaiting null fails
+-- script/main --
+async function run(): Promise<void> {
+  const p: Promise<number> = null
+  const x = await p
+}
+export function main(): number {
+  run()
+  return 0
+}
+-- eval error --
+await of null
+
+=== await is only in async functions
+-- script/main --
+import { later } from "test"
+export function main(): number {
+  const [x, _] = await later(1)
+  return x
+}
+-- compile error --
+await is only in async functions
+
+=== a promise that may fail is taken apart
+-- script/main --
+import { later } from "test"
+async function run(): Promise<void> {
+  const x = await later(1)
+}
+export function main(): number { return 0 }
+-- compile error --
+may fail with ProbeError: take both
+
+=== a promise that can't fail isn't
+-- script/main --
+async function one(): Promise<number> { return 1 }
+async function run(): Promise<void> {
+  const [x, err] = await one()
+}
+export function main(): number { return 0 }
+-- compile error --
+can't fail: take its value alone
+
+=== await isn't part of an expression
+-- script/main --
+import { log } from "test"
+async function two(): Promise<number> { return 2 }
+async function run(): Promise<void> {
+  log(str(await two()))
+}
+export function main(): number { return 0 }
+-- compile error --
+await can't be part of an expression
+
+=== await isn't in a for loop's header
+-- script/main --
+async function two(): Promise<number> { return 2 }
+async function run(): Promise<void> {
+  for (let i = await two(); i < 3; i++) {}
+}
+export function main(): number { return 0 }
+-- compile error --
+await can't be in a for loop's header
+
+=== a promise fails with an error class
+-- script/main --
+async function run(): Promise<number, string> { return 1 }
+export function main(): number { return 0 }
+-- compile error --
+a promise fails with an error class
+
+=== a promise's value isn't an error class
+-- script/main --
+error class E {}
+async function run(): Promise<E> { return new E() }
+export function main(): number { return 0 }
+-- compile error --
+is an error class: a promise fails with it
+
+=== an error class extends only error classes
+-- script/main --
+class Plain {}
+error class E extends Plain {}
+export function main(): number { return 0 }
+-- compile error --
+an error class extends only error classes
+
+=== a plain class doesn't extend an error class
+-- script/main --
+error class E {}
+class Plain extends E {}
+export function main(): number { return 0 }
+-- compile error --
+only an error class extends it
+
+=== an async function returns a promise
+-- script/main --
+async function run(): number { return 1 }
+export function main(): number { return 0 }
+-- compile error --
+an async function returns a Promise
+
+=== an async function returns its promise's value
+-- script/main --
+async function run(): Promise<number> { return true }
+export function main(): number { return 0 }
+-- compile error --
+run returns a number, not a bool
+
+=== a promise that can't fail isn't rejected
+-- script/main --
+error class E {}
+async function run(): Promise<number> { return new E() }
+export function main(): number { return 0 }
+-- compile error --
+run's promise can't fail
+
+=== it fails only with its own error class
+-- script/main --
+error class E {}
+error class F {}
+async function run(): Promise<number, E> { return new F() }
+export function main(): number { return 0 }
+-- compile error --
+run fails with E, not F
+
+=== a promise that may fail doesn't go where one can't
+-- script/main --
+import { later } from "test"
+function f(): Promise<number> { return later(1) }
+export function main(): number { return 0 }
+-- compile error --
+f returns a Promise<number>, not a Promise<number, ProbeError>
+
+=== an async method stands only for an optional method
+-- script/main --
+import { Hooks } from "test"
+class H implements Hooks {
+  async run(): Promise<void> {}
+}
+export function main(): number { return 0 }
+-- compile error --
+H doesn't implement Hooks: run is (): Promise<void>, not (): void
+
+=== a host waits for at most 64 promises at a time
+-- script/main --
+import { later, ProbeError } from "test"
+export function main(): number {
+  const ps: Promise<number, ProbeError>[] = []
+  for (let i = 0; i < 65; i++) {
+    ps.push(later(i))
+  }
+  return ps.length
+}
+-- eval error --
+more than 64 promises

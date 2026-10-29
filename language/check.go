@@ -283,7 +283,7 @@ func (c *checker) declare(m *moduleInfo) {
 		sym := &symbol{name: name, mod: m, pos: pos}
 		switch {
 		case d.class != nil:
-			ci := &classInfo{name: name, mod: m, pos: pos, decl: d.class, native: d.class.native,
+			ci := &classInfo{name: name, mod: m, pos: pos, decl: d.class, native: d.class.native, isError: d.class.isError,
 				fieldByName: map[string]*fieldInfo{}, methods: map[string]*funcInfo{}}
 			ci.typ = &Type{kind: tClass, class: ci}
 			sym.kind, sym.class = symClass, ci
@@ -364,6 +364,8 @@ func (c *checker) resolveType(m *moduleInfo, te *typeExpr) *Type {
 			return typInvalid
 		}
 		t = arrayOf(c.resolveType(m, te.args[0]))
+	case "Promise":
+		t = c.resolvePromise(m, te)
 	default:
 		sym := m.symbols[te.name]
 		switch {
@@ -386,13 +388,39 @@ func (c *checker) resolveType(m *moduleInfo, te *typeExpr) *Type {
 			c.rec.add(m, te.pos, te.name, c.symbolRef(sym, false, aliasLoc(m, sym, te.name)))
 		}
 	}
-	if len(te.args) > 0 && te.name != "Map" && te.name != "Array" {
+	if len(te.args) > 0 && te.name != "Map" && te.name != "Array" && te.name != "Promise" {
 		c.errorf(m, te.pos, "%s takes no type arguments", te.name)
 	}
 	for range te.dims {
 		t = arrayOf(t)
 	}
 	return t
+}
+
+// resolvePromise resolves Promise<T> (a promise that can't fail) or Promise<T, E>, which fails with the error
+// class E. T may be void; it can't be an error class, so what an async function returns says which it does.
+func (c *checker) resolvePromise(m *moduleInfo, te *typeExpr) *Type {
+	if len(te.args) != 1 && len(te.args) != 2 {
+		c.errorf(m, te.pos, "Promise takes its value's type, and the error class it may fail with: Promise<value, error>")
+		return typInvalid
+	}
+	v := typVoid
+	if a := te.args[0]; a.name != "void" || a.dims > 0 || len(a.args) > 0 {
+		v = c.resolveType(m, a)
+	}
+	if v.isErrorClass() {
+		c.errorf(m, te.args[0].pos, "%s is an error class: a promise fails with it, as Promise<value, %s>", v, v)
+		v = typInvalid
+	}
+	var e *Type
+	if len(te.args) == 2 {
+		e = c.resolveType(m, te.args[1])
+		if e.kind != tInvalid && !e.isErrorClass() {
+			c.errorf(m, te.args[1].pos, "a promise fails with an error class (error class %s { … }), not %s", e, e)
+			e = typInvalid
+		}
+	}
+	return promiseOf(v, e)
 }
 
 func (c *checker) resolveAlias(a *aliasInfo, m *moduleInfo) *Type {
@@ -428,7 +456,22 @@ func (c *checker) resolveSig(fn *funcInfo, d *funcDecl, m *moduleInfo) {
 	if d.result != nil {
 		fn.result = c.resolveType(m, d.result)
 	}
-	fn.private, fn.optional = d.private, d.optional
+	fn.private, fn.optional, fn.async = d.private, d.optional, d.async
+	if fn.async && fn.result.kind != tPromise && fn.result.kind != tInvalid {
+		pos := d.pos
+		if d.result != nil {
+			pos = d.result.pos
+		}
+		c.errorf(m, pos, "an async function returns a Promise<value> or a Promise<value, error>, not %s", fn.result)
+		fn.result = typInvalid
+	}
+	if m.host != nil {
+		for i, p := range fn.params {
+			if p.kind == tPromise {
+				c.errorf(m, d.params[i].pos, "a native takes no promise: only scripts await them")
+			}
+		}
+	}
 }
 
 func (c *checker) resolveIface(ii *ifaceInfo) {
@@ -517,6 +560,10 @@ func (c *checker) resolveClass(ci *classInfo) {
 			c.errorf(m, d.extends.pos, "%s is the host's, and can't be extended", t)
 		case ci.native:
 			c.errorf(m, d.extends.pos, "a native class extends nothing")
+		case t.class.isError && !ci.isError:
+			c.errorf(m, d.extends.pos, "%s is an error class, so only an error class extends it: error class %s", t, ci.name)
+		case !t.class.isError && ci.isError:
+			c.errorf(m, d.extends.pos, "an error class extends only error classes, and %s is not one", t)
 		default:
 			c.resolveClass(t.class)
 			if t.class.state == 2 || t.class.ctor != nil {
@@ -543,6 +590,9 @@ func (c *checker) resolveClass(ci *classInfo) {
 		switch {
 		case f.typ != nil:
 			fi.typ = c.resolveType(m, f.typ)
+			if ci.native && fi.typ.kind == tPromise {
+				c.errorf(m, f.pos, "a native field holds no promise: a native method returns one")
+			}
 		default:
 			fi.typ = literalType(f.init)
 			if fi.typ == nil {
@@ -577,6 +627,8 @@ func (c *checker) resolveClass(ci *classInfo) {
 				c.errorf(m, md.pos, "%s overrides %s.%s, and one of them is private", md.name, base.owner.name, md.name)
 			case !fn.sameSignature(base):
 				c.errorf(m, md.pos, "%s overrides %s.%s%s with another signature", md.name, base.owner.name, md.name, base.signature())
+			case fn.async != base.async && fn.result.kind != tInvalid:
+				c.errorf(m, md.pos, "%s overrides %s.%s, and only one of them is async", md.name, base.owner.name, md.name)
 			}
 		}
 		if ci.native {
@@ -657,7 +709,11 @@ func (c *checker) compileFunc(fn *funcInfo, d *funcDecl, class *classInfo) {
 		fc.declareParam(p.name, fn.params[i], p.pos)
 	}
 	body, done := fc.stmts(d.body.stmts)
-	if fn.result.kind != tVoid && !done {
+	result := fn.result
+	if fn.async && result.kind == tPromise {
+		result = result.elem
+	}
+	if result.kind != tVoid && result.kind != tInvalid && !done {
 		c.errorf(fn.mod, d.pos, "%s doesn't return a value on every path", fn.name)
 	}
 	fn.body, fn.locals = body, fc.slots

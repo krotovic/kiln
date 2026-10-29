@@ -37,6 +37,9 @@ func (fc *funcCtx) stmt(s stmt) (irStmt, bool) {
 	case *assignStmt:
 		return fc.assign(s), false
 	case *exprStmt:
+		if a, ok := s.x.(*awaitNode); ok {
+			return fc.await(a, false), false
+		}
 		switch s.x.(type) {
 		case *callNode, *methodCallNode, *superMethodNode, *newNode:
 		case *superCallNode:
@@ -65,6 +68,7 @@ func (fc *funcCtx) stmt(s stmt) (irStmt, bool) {
 		fc.push()
 		defer fc.pop()
 		loop := &irLoop{pos: s.pos}
+		fc.header = true
 		if s.init != nil {
 			loop.init, _ = fc.stmt(s.init)
 		}
@@ -74,6 +78,7 @@ func (fc *funcCtx) stmt(s stmt) (irStmt, bool) {
 		if s.step != nil {
 			loop.step, _ = fc.stmt(s.step)
 		}
+		fc.header = false
 		fc.loops++
 		loop.body, _ = fc.block(s.body)
 		fc.loops--
@@ -113,9 +118,33 @@ func (fc *funcCtx) stmt(s stmt) (irStmt, bool) {
 }
 
 func (fc *funcCtx) let(s *letStmt) irStmt {
+	if s.names != nil {
+		return fc.destructure(s)
+	}
 	var want *Type
 	if s.typ != nil {
 		want = fc.c.resolveType(fc.m, s.typ)
+	}
+	if a, ok := s.init.(*awaitNode); ok {
+		promise, pt := fc.awaited(a)
+		t := typInvalid
+		switch {
+		case pt.kind != tPromise:
+		case pt.key != nil:
+			fc.errorf(a.pos, "%s may fail with %s: take both, const [%s, err] = await …", pt, pt.key, s.name)
+		case pt.elem.kind == tVoid:
+			fc.errorf(a.pos, "that gives nothing to put in %s", s.name)
+		default:
+			t = pt.elem
+		}
+		if want != nil {
+			if !assignable(t, want) {
+				fc.errorf(a.pos, "%s is a %s, not a %s", s.name, t, want)
+			}
+			t = want
+		}
+		slot := fc.declare(s.name, t, s.constant, s.pos).slot
+		return fc.awaitInto(promise, pt, &irTarget{kind: targetLocal, t: t, slot: slot, pos: s.pos}, nil, a.pos)
 	}
 	var init irExpr
 	t := want
@@ -142,9 +171,113 @@ func (fc *funcCtx) let(s *letStmt) irStmt {
 	return &irLet{slot: slot, t: t, init: init, pos: s.pos}
 }
 
+// destructure checks const [v, err] = await p, which takes both what a promise that may fail gives.
+func (fc *funcCtx) destructure(s *letStmt) irStmt {
+	a, ok := s.init.(*awaitNode)
+	if !ok {
+		fc.errorf(s.pos, "only what an await gives is taken apart: const [value, err] = await …")
+		fc.expr(s.init, nil)
+		return &irNop{}
+	}
+	promise, pt := fc.awaited(a)
+	if len(s.names) != 2 {
+		fc.errorf(s.pos, "an await gives two things: const [value, err] = await …")
+	}
+	vt, et := typInvalid, typInvalid
+	if pt.kind == tPromise {
+		if pt.key == nil {
+			fc.errorf(a.pos, "%s can't fail: take its value alone, const %s = await …", pt, s.names[0])
+		} else {
+			vt, et = pt.elem, pt.key
+		}
+	}
+	var targets [2]*irTarget
+	for i, name := range s.names {
+		if i > 1 || name == "_" {
+			continue
+		}
+		t := et
+		if i == 0 {
+			t = vt
+			if t.kind == tVoid {
+				fc.errorf(s.namePos[i], "that promise gives no value: write [_, %s]", s.names[len(s.names)-1])
+				t = typInvalid
+			}
+		}
+		slot := fc.declare(name, t, s.constant, s.namePos[i]).slot
+		targets[i] = &irTarget{kind: targetLocal, t: t, slot: slot, pos: s.namePos[i]}
+	}
+	return fc.awaitInto(promise, pt, targets[0], targets[1], a.pos)
+}
+
+// awaited checks what an await waits for: a promise, in an async function. Its type is invalid when it isn't one.
+func (fc *funcCtx) awaited(a *awaitNode) (irExpr, *Type) {
+	switch {
+	case fc.fn == nil || !fc.fn.async:
+		fc.errorf(a.pos, "await is only in async functions")
+	case fc.header:
+		fc.errorf(a.pos, "await can't be in a for loop's header")
+	}
+	x, t := fc.expr(a.x, nil)
+	if t.kind != tPromise {
+		if t.kind != tInvalid {
+			fc.errorf(a.x.position(), "await waits for a promise, not a %s", t)
+		}
+		return x, typInvalid
+	}
+	return x, t
+}
+
+// awaitInto is the code of an await whose value goes to val and error to err (nil drops them).
+func (fc *funcCtx) awaitInto(promise irExpr, pt *Type, val, err *irTarget, pos int) irStmt {
+	if pt.kind != tPromise {
+		return &irNop{}
+	}
+	return &irAwait{promise: promise, t: pt.elem, e: pt.key, val: val, err: err, pos: pos}
+}
+
+// await checks an await statement, which drops what the promise gives, or with ret, return await.
+func (fc *funcCtx) await(a *awaitNode, ret bool) irStmt {
+	promise, pt := fc.awaited(a)
+	if pt.kind != tPromise {
+		return &irNop{}
+	}
+	out := &irAwait{promise: promise, t: pt.elem, e: pt.key, ret: ret, pos: a.pos}
+	if ret && fc.fn != nil && fc.fn.async && fc.fn.result.kind == tPromise {
+		own := fc.fn.result
+		if !assignable(pt.elem, own.elem) && !(pt.elem.kind == tVoid && own.elem.kind == tVoid) {
+			fc.errorf(a.pos, "%s returns a %s, not a %s", fc.fn.name, own.elem, pt.elem)
+		}
+		if pt.key != nil && (own.key == nil || !assignable(pt.key, own.key)) {
+			if own.key == nil {
+				fc.errorf(a.pos, "that may fail with %s, and %s's promise can't fail: take the error, const [v, err] = await …", pt.key, fc.fn.name)
+			} else {
+				fc.errorf(a.pos, "that may fail with %s, and %s fails with %s", pt.key, fc.fn.name, own.key)
+			}
+		}
+	}
+	return out
+}
+
 func (fc *funcCtx) ret(s *returnStmt) irStmt {
 	if fc.fn == nil {
 		fc.errorf(s.pos, "return is only in functions")
+		return &irReturn{pos: s.pos}
+	}
+	if a, ok := s.value.(*awaitNode); ok {
+		if fc.fn.async {
+			return fc.await(a, true)
+		}
+		fc.awaited(a)
+		return &irReturn{pos: s.pos}
+	}
+	if fc.fn.async && fc.fn.result.kind == tPromise {
+		return fc.retAsync(s)
+	}
+	if fc.fn.async {
+		if s.value != nil {
+			fc.expr(s.value, nil)
+		}
 		return &irReturn{pos: s.pos}
 	}
 	result := fc.fn.result
@@ -171,7 +304,51 @@ func (fc *funcCtx) ret(s *returnStmt) irStmt {
 	return &irReturn{value: v, pos: s.pos}
 }
 
+// retAsync checks a return in an async function: a value fulfils its promise, an error (an object of an error
+// class) rejects it.
+func (fc *funcCtx) retAsync(s *returnStmt) irStmt {
+	own := fc.fn.result
+	t, e := own.elem, own.key
+	if s.value == nil {
+		if t.kind != tVoid {
+			fc.errorf(s.pos, "%s returns a %s", fc.fn.name, t)
+		}
+		return &irReturn{pos: s.pos}
+	}
+	want := t
+	if want.kind == tVoid {
+		want = nil
+	}
+	v, vt := fc.expr(s.value, want)
+	if vt.isErrorClass() {
+		switch {
+		case e == nil:
+			fc.errorf(s.value.position(), "%s's promise can't fail: give it an error class to fail with, Promise<%s, %s>", fc.fn.name, t, vt)
+		case !assignable(vt, e):
+			fc.errorf(s.value.position(), "%s fails with %s, not %s", fc.fn.name, e, vt)
+		}
+		return &irReturn{value: v, reject: true, pos: s.pos}
+	}
+	switch {
+	case vt.kind == tInvalid:
+	case t.kind == tVoid:
+		fc.errorf(s.value.position(), "%s returns nothing; give its promise a value type to return a value", fc.fn.name)
+		return &irReturn{pos: s.pos}
+	case !assignable(vt, t):
+		fc.errorf(s.value.position(), "%s returns a %s, not a %s", fc.fn.name, t, vt)
+	}
+	return &irReturn{value: v, pos: s.pos}
+}
+
 func (fc *funcCtx) assign(s *assignStmt) irStmt {
+	if a, ok := s.value.(*awaitNode); ok {
+		return fc.assignAwait(s, a)
+	}
+	if arr, ok := s.target.(*arrayNode); ok {
+		fc.errorf(arr.pos, "only what an await gives is taken apart: [value, err] = await …")
+		fc.expr(s.value, nil)
+		return &irNop{}
+	}
 	target := fc.target(s.target)
 	if target == nil {
 		if s.value != nil {
@@ -208,6 +385,60 @@ func (fc *funcCtx) assign(s *assignStmt) irStmt {
 		out.op, out.value = s.op[0], v
 	}
 	return out
+}
+
+// assignAwait checks x = await p, and [v, err] = await p for a promise that may fail.
+func (fc *funcCtx) assignAwait(s *assignStmt, a *awaitNode) irStmt {
+	if s.op != "=" {
+		fc.errorf(s.pos, "%s takes no await: put what it gives in a variable first", s.op)
+		fc.awaited(a)
+		return &irNop{}
+	}
+	promise, pt := fc.awaited(a)
+	if arr, ok := s.target.(*arrayNode); ok {
+		if len(arr.items) != 2 {
+			fc.errorf(arr.pos, "an await gives two things: [value, err] = await …")
+		}
+		if pt.kind == tPromise && pt.key == nil {
+			fc.errorf(a.pos, "%s can't fail: take its value alone, x = await …", pt)
+		}
+		var targets [2]*irTarget
+		for i, item := range arr.items {
+			if n, ok := item.(*nameNode); (ok && n.name == "_") || i > 1 {
+				continue
+			}
+			t := fc.target(item)
+			if t == nil || pt.kind != tPromise || pt.key == nil {
+				continue
+			}
+			want := pt.elem
+			if i == 1 {
+				want = pt.key
+			}
+			if want.kind == tVoid {
+				fc.errorf(item.position(), "that promise gives no value: write [_, err]")
+				continue
+			}
+			if !assignable(want, t.t) {
+				fc.errorf(item.position(), "that is a %s, not a %s", want, t.t)
+			}
+			targets[i] = t
+		}
+		return fc.awaitInto(promise, pt, targets[0], targets[1], a.pos)
+	}
+	target := fc.target(s.target)
+	if target == nil || pt.kind != tPromise {
+		return &irNop{}
+	}
+	switch {
+	case pt.key != nil:
+		fc.errorf(a.pos, "%s may fail with %s: take both, [x, err] = await …", pt, pt.key)
+	case pt.elem.kind == tVoid:
+		fc.errorf(a.pos, "that gives nothing to assign")
+	case !assignable(pt.elem, target.t):
+		fc.errorf(a.pos, "that is a %s, not a %s", pt.elem, target.t)
+	}
+	return fc.awaitInto(promise, pt, target, nil, a.pos)
 }
 
 // target checks the left side of an assignment: a variable, a field or an array element. It is nil when it

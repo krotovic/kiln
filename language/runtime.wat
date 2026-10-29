@@ -1025,12 +1025,100 @@
 (func $__native_get (param $nh i32) (result i32)
   (i32.load offset=16 (i32.add (global.get $natives) (i32.shl (local.get $nh) (i32.const 2)))))
 
+;; ---- promises (gen_async.go): a promise is an object of a hidden class, +16 its state (0 pending, 1 fulfilled,
+;; 2 rejected), +24 its value, +32 its error, +40 the first frame waiting on it; a frame is an async function's
+;; object, +32 the next frame waiting on the same promise, or in the run queue ($qhead, $qtail) once woken ----
+
+;; $promise_new makes a pending promise of a number, bool or nothing (kind 0), a string (1, its value "" until
+;; it settles) or another reference (2).
+(func $promise_new (param $kind i32) (param $pos i32) (result i32)
+  (local $p i32)
+  (if (i32.eqz (local.get $kind))
+    (then (return (call $alloc (i32.const 48) (i32.const $T_PROMISE_N) (local.get $pos)))))
+  (local.set $p (call $alloc (i32.const 48) (i32.const $T_PROMISE_R) (local.get $pos)))
+  (if (i32.eq (local.get $kind) (i32.const 1)) (then (i32.store offset=24 (local.get $p) (i32.const $S_empty))))
+  (local.get $p))
+
+;; $promise_settle gives the pending promise p its state and queues the frames waiting on it, in the order they
+;; started waiting.
+(func $promise_settle (param $p i32) (param $state i32)
+  (local $f i32) (local $next i32) (local $rev i32)
+  (i32.store offset=16 (local.get $p) (local.get $state))
+  (local.set $f (i32.load offset=40 (local.get $p)))
+  (i32.store offset=40 (local.get $p) (i32.const 0))
+  ;; the waiters are the latest first
+  (block $done (loop $next
+    (br_if $done (i32.eqz (local.get $f)))
+    (local.set $next (i32.load offset=32 (local.get $f)))
+    (i32.store offset=32 (local.get $f) (local.get $rev))
+    (local.set $rev (local.get $f))
+    (local.set $f (local.get $next))
+    (br $next)))
+  (block $done (loop $next
+    (br_if $done (i32.eqz (local.get $rev)))
+    (local.set $next (i32.load offset=32 (local.get $rev)))
+    (i32.store offset=32 (local.get $rev) (i32.const 0))
+    (if (global.get $qtail)
+      (then (i32.store offset=32 (global.get $qtail) (local.get $rev)))
+      (else (global.set $qhead (local.get $rev))))
+    (global.set $qtail (local.get $rev))
+    (local.set $rev (local.get $next))
+    (br $next))))
+
+;; $promise_fulfil_f, $promise_fulfil_i and $promise_reject settle p, unless it is settled already.
+(func $promise_fulfil_f (param $p i32) (param $v f64)
+  (if (i32.load offset=16 (local.get $p)) (then (return)))
+  (f64.store offset=24 (local.get $p) (local.get $v))
+  (call $promise_settle (local.get $p) (i32.const 1)))
+
+(func $promise_fulfil_i (param $p i32) (param $v i32)
+  (if (i32.load offset=16 (local.get $p)) (then (return)))
+  (i32.store offset=24 (local.get $p) (local.get $v))
+  (call $promise_settle (local.get $p) (i32.const 1)))
+
+(func $promise_reject (param $p i32) (param $e i32)
+  (if (i32.load offset=16 (local.get $p)) (then (return)))
+  (i32.store offset=32 (local.get $p) (local.get $e))
+  (call $promise_settle (local.get $p) (i32.const 2)))
+
+;; $promise_drain resumes the woken frames, in order, until none is left; a frame that settles its own promise
+;; wakes those waiting on it.
+(func $promise_drain
+  (local $f i32)
+  (block $done (loop $next
+    (local.set $f (global.get $qhead))
+    (br_if $done (i32.eqz (local.get $f)))
+    (global.set $qhead (i32.load offset=32 (local.get $f)))
+    (if (i32.eqz (global.get $qhead)) (then (global.set $qtail (i32.const 0))))
+    (i32.store offset=32 (local.get $f) (i32.const 0))
+    (call $frame_resume (local.get $f))
+    (br $next))))
+
 ;; ---- what the host calls besides the script's own code ----
+
+(func $__promise_new (param $kind i32) (result i32)
+  (call $promise_new (local.get $kind) (global.get $npos)))
+
+;; $__promise_resolve_f, $__promise_resolve_i and $__promise_reject settle a promise the host made, and run what
+;; waited for it.
+(func $__promise_resolve_f (param $p i32) (param $v f64)
+  (call $promise_fulfil_f (local.get $p) (local.get $v))
+  (call $promise_drain))
+
+(func $__promise_resolve_i (param $p i32) (param $v i32)
+  (call $promise_fulfil_i (local.get $p) (local.get $v))
+  (call $promise_drain))
+
+(func $__promise_reject (param $p i32) (param $e i32)
+  (call $promise_reject (local.get $p) (local.get $e))
+  (call $promise_drain))
 
 (func $__begin
   (global.set $steps (i32.const $MAX_STEPS))
   (global.set $depth (i32.const 0))
-  (global.set $alloc (i32.const 0)))
+  (global.set $alloc (i32.const 0))
+  (global.set $qhead (i32.const 0))
+  (global.set $qtail (i32.const 0)))
 
 ;; $__end ends a call from the host: when the calls since the last collection allocated more than half the heap
 ;; budget, it collects and returns the bytes that are left; otherwise -1.

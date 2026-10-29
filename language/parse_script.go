@@ -5,13 +5,13 @@ import (
 	"strings"
 )
 
-// keywords can't be names in scripts. void is a type; constructor, of, from, as, readonly, private, native and
-// default are words only where the grammar expects them.
+// keywords can't be names in scripts. void is a type; constructor, of, from, as, readonly, private, native,
+// default, async and error are words only where the grammar expects them.
 var keywords = map[string]bool{
 	"let": true, "const": true, "function": true, "class": true, "interface": true, "type": true,
 	"extends": true, "implements": true, "new": true, "this": true, "super": true, "return": true, "if": true,
 	"else": true, "while": true, "for": true, "break": true, "continue": true, "import": true, "export": true,
-	"null": true, "true": true, "false": true, "void": true, "undefined": true,
+	"null": true, "true": true, "false": true, "void": true, "undefined": true, "await": true,
 }
 
 // The grammar of a module, on top of the expression grammar (parser.go):
@@ -20,13 +20,17 @@ var keywords = map[string]bool{
 //	import  = "import" ( name [ "," names ] | names ) "from" string [ ";" ]   (a lone name is the default export)
 //	names   = "{" name [ "as" name ] { "," name [ "as" name ] } "}"
 //	decl    = class | interface | "type" name "=" type | function | "const" name [ ":" type ] "=" cond
-//	class   = [ "native" ] "class" name [ "extends" name ] [ "implements" name { "," name } ] "{" { member } "}"
-//	member  = { "private" | "readonly" } ( name [ "?" ] ":" type [ "=" cond ] | name params [ ":" type ] block
-//	          | "constructor" params block )
-//	function = [ "native" ] "function" name params [ ":" type ] ( block | ";" )
+//	class   = [ "native" ] [ "error" ] "class" name [ "extends" name ] [ "implements" name { "," name } ]
+//	          "{" { member } "}"
+//	member  = { "private" | "readonly" } ( name [ "?" ] ":" type [ "=" cond ] | [ "async" ] name params [ ":" type ]
+//	          block | "constructor" params block )
+//	function = [ "native" ] [ "async" ] "function" name params [ ":" type ] ( block | ";" )
 //	params  = "(" [ name ":" type { "," name ":" type } ] ")"
 //	stmt    = block | "let" | "const" ... | "if" | "while" | "for" | "break" | "continue" | "return" [ cond ]
 //	          | target ( "=" | "+=" | "-=" | "*=" | "/=" | "%=" ) cond | target ( "++" | "--" ) | cond
+//	let     = ( "let" | "const" ) ( name [ ":" type ] [ "=" cond ] | "[" name "," name "]" "=" cond )
+//
+// await x is a unary operator; the checker takes it only as the whole value of a statement.
 //
 // Statements end with ; or at a line break, a } or the end, so semicolons are optional as in TypeScript; a return
 // followed by a line break returns nothing.
@@ -202,6 +206,19 @@ func (p *parser) decl() (*decl, error) {
 		}
 		native = true
 	}
+	isError := false
+	if p.isWord("error") && p.at+1 < len(p.toks) && p.toks[p.at+1].kind == tokIdent && p.toks[p.at+1].text == "class" {
+		p.next()
+		isError = true
+	}
+	async := false
+	if p.isWord("async") && p.at+1 < len(p.toks) && p.toks[p.at+1].kind == tokIdent && p.toks[p.at+1].text == "function" {
+		t := p.next()
+		if native {
+			return nil, compileErr(t.pos, "a native function isn't async: it returns a Promise the host settles")
+		}
+		async = true
+	}
 	t := p.peek()
 	// A host module is a definition file: it declares, and the host's code does the rest
 	if p.native && !native && !p.isWord("interface") && !p.isWord("type") {
@@ -211,6 +228,9 @@ func (p *parser) decl() (*decl, error) {
 	switch {
 	case p.isWord("class"):
 		d.class, err = p.classDecl(native)
+		if d.class != nil {
+			d.class.isError = isError
+		}
 	case native && !p.isWord("function"):
 		return nil, compileErr(t.pos, "expected class or function after native")
 	case p.isWord("interface"):
@@ -220,6 +240,9 @@ func (p *parser) decl() (*decl, error) {
 	case p.isWord("function"):
 		d.native = native
 		d.fn, err = p.function(native)
+		if d.fn != nil {
+			d.fn.async = async
+		}
 	case p.isWord("const"):
 		d.konst, err = p.constDecl()
 	case p.isWord("let"):
@@ -340,6 +363,18 @@ func (p *parser) classDecl(native bool) (*classDecl, error) {
 				readonly = true
 			}
 		}
+		async := false
+		if p.isWord("async") && p.at+2 < len(p.toks) && p.toks[p.at+1].kind == tokIdent &&
+			p.toks[p.at+2].kind == tokOp && p.toks[p.at+2].text == "(" {
+			t := p.next()
+			if native {
+				return nil, compileErr(t.pos, "a native method isn't async: it returns a Promise the host settles")
+			}
+			if p.isWord("constructor") {
+				return nil, compileErr(t.pos, "a constructor can't be async")
+			}
+			async = true
+		}
 		if p.isWord("constructor") {
 			t := p.next()
 			if c.ctor != nil {
@@ -369,9 +404,12 @@ func (p *parser) classDecl(native bool) (*classDecl, error) {
 			if err != nil {
 				return nil, err
 			}
-			m.private, m.doc, m.end = private, doc, p.lastEnd()
+			m.private, m.async, m.doc, m.end = private, async, doc, p.lastEnd()
 			c.methods = append(c.methods, m)
 			continue
+		}
+		if async {
+			return nil, compileErr(mn.pos, "only a method can be async")
 		}
 		f, err := p.fieldRest(mn, private, readonly)
 		if err != nil {
@@ -658,6 +696,9 @@ func (p *parser) parenCond() (node, error) {
 
 func (p *parser) letStmt() (*letStmt, error) {
 	kw := p.next()
+	if p.isOp("[") {
+		return p.destructure(kw)
+	}
 	n, err := p.name("a variable's name")
 	if err != nil {
 		return nil, err
@@ -684,6 +725,34 @@ func (p *parser) letStmt() (*letStmt, error) {
 		}
 	}
 	return s, nil
+}
+
+// destructure parses the rest of const [v, err] = cond, after the keyword.
+func (p *parser) destructure(kw token) (*letStmt, error) {
+	open := p.next()
+	s := &letStmt{stmtBase: stmtBase{open.pos}, constant: kw.text == "const"}
+	for {
+		n, err := p.name("a variable's name")
+		if err != nil {
+			return nil, err
+		}
+		s.names = append(s.names, n.text)
+		s.namePos = append(s.namePos, n.pos)
+		if !p.isOp(",") {
+			break
+		}
+		p.next()
+	}
+	if _, err := p.op("]"); err != nil {
+		return nil, err
+	}
+	if !p.isOp("=") {
+		return nil, compileErr(p.peek().pos, "expected = but found %s", describe(p.peek()))
+	}
+	p.next()
+	var err error
+	s.init, err = p.cond()
+	return s, err
 }
 
 // simpleStmt parses an assignment, an increment or an expression statement.

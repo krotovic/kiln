@@ -79,7 +79,7 @@ const (
 	roleUnary          // - + ! before an operand
 	rolePrefix         // ++ -- before an operand
 	roleOptional       // the ? of an optional method: name?()
-	roleTypeOpen       // the < of Map< or Array<
+	roleTypeOpen       // the < of Map<, Array< or Promise<
 	roleTypeClose      // its >
 	roleTernary        // the : of a conditional
 )
@@ -119,7 +119,7 @@ func classify(toks []token) []role {
 				roles[i] = roleTernary
 			}
 		case "<":
-			if prev != nil && prev.kind == tokIdent && (prev.text == "Map" || prev.text == "Array") {
+			if prev != nil && prev.kind == tokIdent && (prev.text == "Map" || prev.text == "Array" || prev.text == "Promise") {
 				roles[i] = roleTypeOpen
 				typeOpen++
 			}
@@ -157,7 +157,7 @@ func endsOperand(t *token) bool {
 }
 
 // controlWords take a space before a ( after them.
-var controlWords = map[string]bool{"if": true, "while": true, "for": true, "return": true}
+var controlWords = map[string]bool{"if": true, "while": true, "for": true, "return": true, "await": true}
 
 // spaceBetween says whether a space goes between tokens a and b on one line.
 func spaceBetween(toks []token, roles []role, a, b int) bool {

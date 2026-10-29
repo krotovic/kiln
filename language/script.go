@@ -170,7 +170,11 @@ type HostModule struct {
 type NativeFunc func(c *Call, this Value, args []Value) (Value, error)
 
 // Call is what a native function knows about the call it serves.
-type Call struct{ data any }
+type Call struct {
+	data   any
+	in     *Instance
+	result typeMeta
+}
 
 // Data is what the host gave the Instance (Script.New) or Script.Call this call came from.
 func (c *Call) Data() any { return c.data }

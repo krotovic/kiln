@@ -71,6 +71,11 @@ type gen struct {
 	nativeID   map[string]int
 	fieldFuncs map[string]*wasm.Func
 	trap       *wasm.Func
+
+	promises bool // the script makes promises (gen_async.go)
+	frames   map[*funcInfo]*frameInfo
+	frameOf  map[*classInfo]*frameInfo
+	resumes  map[*funcInfo]*wasm.Func
 }
 
 // selector is a name the dispatch table answers: a method, or a field's getter or setter, with the signature
@@ -116,7 +121,8 @@ func (c *checker) generate(entry *moduleInfo) ([]byte, *scriptMeta, error) {
 		classIdx: map[*classInfo]int{}, funcs: map[*funcInfo]*wasm.Func{}, natives: map[*funcInfo]*wasm.Func{},
 		getters: map[*fieldInfo]*wasm.Func{}, allocs: map[*classInfo]*wasm.Func{}, constGlbs: map[*constInfo]uint32{},
 		finals: map[*funcInfo]map[*classInfo]bool{}, selectors: map[string]int{}, nativeID: map[string]int{},
-		fieldFuncs: map[string]*wasm.Func{},
+		fieldFuncs: map[string]*wasm.Func{}, frames: map[*funcInfo]*frameInfo{}, frameOf: map[*classInfo]*frameInfo{},
+		resumes: map[*funcInfo]*wasm.Func{},
 		meta: &scriptMeta{ABI: abiVersion, Entry: entry.id, Limits: c.limits, Messages: errorMessages,
 			Classes: []classMeta{}, Natives: []nativeMeta{}, Hosts: []hostMeta{}, Funcs: map[string]*funcMeta{},
 			Exports: map[string]int{}},
@@ -136,7 +142,7 @@ func (g *gen) run() ([]byte, *scriptMeta, error) {
 	imp(impFmod, []wasm.ValType{f64, f64}, []wasm.ValType{f64})
 	imp(impRelease, []wasm.ValType{i32}, nil)
 	for _, name := range []string{"heap", "hp", "steps", "depth", "alloc", "since", "handles", "hfree", "hnext",
-		"natives", "npos", "msp", "msphi"} {
+		"natives", "npos", "msp", "msphi", "qhead", "qtail"} {
 		g.globals[name] = g.m.GlobalI32(true, 0)
 	}
 	g.setSymbols()
@@ -268,7 +274,7 @@ func (g *gen) runtime(name string) uint32 {
 		return f.Index
 	}
 	var t wasm.FuncType
-	if name == "gc_consts" {
+	if name == "gc_consts" || name == "frame_resume" {
 		t = wasm.FuncType{Params: []wasm.ValType{wasm.I32}}
 	} else {
 		w, ok := g.lib[name]
@@ -289,6 +295,10 @@ func (g *gen) drainRuntime() error {
 		g.rtQueue = g.rtQueue[1:]
 		if name == "gc_consts" {
 			g.emitGCConsts(g.rt[name])
+			continue
+		}
+		if name == "frame_resume" {
+			g.emitFrameResume(g.rt[name])
 			continue
 		}
 		if err := g.lib[name].Emit(g.rt[name], g); err != nil {
@@ -366,6 +376,7 @@ func (g *gen) collectClasses() {
 			}
 		}
 	}
+	g.collectAsync(add)
 	for _, ci := range g.classes {
 		g.meta.Classes = append(g.meta.Classes, g.classMeta(ci))
 	}
@@ -395,6 +406,13 @@ func (g *gen) typeMeta(t *Type) typeMeta {
 		tm.K, tm.Key, tm.E = "m", &k, &e
 	case tClass:
 		tm.K, tm.C = "c", g.classIdx[t.class]
+	case tPromise:
+		e := g.typeMeta(t.elem)
+		tm.K, tm.E = "p", &e
+		if t.key != nil {
+			x := g.typeMeta(t.key)
+			tm.Err = &x
+		}
 	default:
 		tm.K = "i"
 	}
@@ -419,6 +437,9 @@ func classSize(ci *classInfo) int {
 func (g *gen) classMeta(ci *classInfo) classMeta {
 	cm := classMeta{Name: ci.name, Module: ci.mod.id, Native: ci.native, Size: classSize(ci), Fields: []fieldMeta{},
 		Methods: map[string]*methodMeta{}, Ctor: []typeMeta{}}
+	if ci.hidden {
+		return cm
+	}
 	if ci.mod.host == nil {
 		cm.Pos = g.pos(ci.mod, ci.pos)
 	}
@@ -510,6 +531,9 @@ func (g *gen) declareFuncs() {
 			}
 		}
 	}
+	for fn, info := range g.frames {
+		g.resumes[fn] = g.m.Func(info.class.name+" resume", wasm.FuncType{Params: []wasm.ValType{wasm.I32}})
+	}
 }
 
 func (g *gen) emitFuncs() error {
@@ -517,13 +541,17 @@ func (g *gen) emitFuncs() error {
 		for _, d := range m.ast.decls {
 			switch {
 			case d.sym == nil:
+			case d.fn != nil && !d.native && d.sym.fn.async:
+				g.emitAsync(d.sym.fn, nil)
 			case d.fn != nil && !d.native:
 				fn := d.sym.fn
 				g.emitBody(g.funcs[fn], fn, nil, fn.body)
 			case d.class != nil && !d.sym.class.native:
 				ci := d.sym.class
 				for _, md := range d.class.methods {
-					if fn := ci.methods[md.name]; fn != nil && fn.owner == ci {
+					if fn := ci.methods[md.name]; fn != nil && fn.owner == ci && fn.async {
+						g.emitAsync(fn, ci)
+					} else if fn != nil && fn.owner == ci {
 						g.emitBody(g.funcs[fn], fn, ci, fn.body)
 					}
 				}
@@ -733,6 +761,11 @@ func (g *gen) entryFor(s selector, k *classInfo) *wasm.Func {
 			return nil
 		}
 		return g.funcFor(fn)
+	case "resume":
+		if info := g.frameOf[k]; info != nil {
+			return g.resumes[info.fn]
+		}
+		return nil
 	case "get", "set":
 		fi := k.fieldByName[s.name]
 		if fi == nil {
@@ -838,8 +871,13 @@ func (g *gen) emitExports() {
 		"__handle_new", "__handle_get", "__handle_drop", "__native_new", "__native_get"} {
 		g.m.Export(name, wasm.ExportFunc, g.runtime(name))
 	}
+	if g.promises {
+		for _, name := range []string{"__promise_new", "__promise_resolve_f", "__promise_resolve_i", "__promise_reject"} {
+			g.m.Export(name, wasm.ExportFunc, g.runtime(name))
+		}
+	}
 	for i, ci := range g.classes {
-		if ci.native {
+		if ci.native || ci.hidden {
 			continue
 		}
 		g.m.Export(fmt.Sprintf("n%d", i), wasm.ExportFunc, g.allocFunc(ci).Index)

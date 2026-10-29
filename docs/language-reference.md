@@ -96,10 +96,12 @@ export class Bag implements Named {
 - **Names** start with a letter or `_`, followed by letters, digits and `_`.
 - **Keywords** can't be names: `let`, `const`, `function`, `class`, `interface`, `type`, `extends`, `implements`,
   `new`, `this`, `super`, `return`, `if`, `else`, `while`, `for`, `break`, `continue`, `import`, `export`, `null`,
-  `true`, `false`, `void`, `undefined`. Some words count only where the grammar expects them: `constructor`, `of`,
-  `from`, `as`, `default`, `private`, `readonly`, `native`.
+  `true`, `false`, `void`, `undefined`, `await`. Some words count only where the grammar expects them: `constructor`,
+  `of`, `from`, `as`, `default`, `private`, `readonly`, `native`, `async` (before `function` or a method's name) and
+  `error` (before `class`).
 - **Comments:** `// to the end of the line` and `/* … */`.
-- **Semicolons** are optional, as in TypeScript: a statement ends at a `;`, a line break, a `}` or the end.
+- **Semicolons** are optional, as in TypeScript: a statement ends at a `;`, a line break, a `}` or the end. A `[` that
+  starts a line starts a statement (`[v, err] = await p`), never an index into the line before.
 
 ### Types
 
@@ -112,6 +114,7 @@ export class Bag implements Named {
 | `Map<K, V>` | maps with `number` or `string` keys | `null` |
 | a class | its objects and its subclasses' | `null` |
 | an interface | objects of any class with its members | `null` |
+| `Promise<T>`, `Promise<T, E>` | what an async function or the host settles later (see [Async functions](#async-functions-and-promises)) | `null` |
 
 - `void` is only a function's result: it returns nothing.
 - `type Name = …` names a type: `type Names = string[]`.
@@ -212,6 +215,72 @@ function grade(score: number): string {
   function with one must return on every path.
 - Functions may call each other and recurse, within the [budgets](#budgets).
 - There are no function values or closures yet.
+
+### Async functions and promises
+
+What the host has to fetch (an inventory the World keeps, say) comes back later. A function that waits for it is
+`async`, and returns a promise its body settles:
+
+```ts
+import { Behaviour, Context, ActionEvent, InventoryError, trade, log } from "game"
+
+error class ShopError {
+  code: string
+  constructor(code: string) { this.code = code }
+}
+
+// What the player can afford: a promise that fails with a ShopError
+async function afford(ctx: Context, event: ActionEvent, price: number): Promise<number, ShopError> {
+  const [gold, err] = await event.player.inventory("").amount("gold")
+  if (err != null) { return new ShopError(err.code) }        // an error rejects the promise
+  if (gold < price) { return new ShopError("poor") }
+  return gold                                                // a value fulfils it
+}
+
+export default class Shop implements Behaviour {
+  async onAction(ctx: Context, event: ActionEvent): Promise<void> {
+    const [gold, err] = await afford(ctx, event, 10)
+    if (err != null) { log("can't buy: " + err.code); return }
+    const [done, failed] = await ctx.object.exchange(event.player, trade().pay("gold", 10).receive("iron-sword", 1))
+    log(failed == null ? "sold" : "refused: " + failed.code)
+  }
+}
+```
+
+- **`Promise<T>`** can't fail; **`Promise<T, E>`** fails with an `E`, which must be an **error class**. `T` may be
+  `void`, and can't be an error class, so what a `return` settles is always clear.
+- **Error classes** are declared `error class Name { … }` (`export error class …`; a host module's
+  `export native error class …`). They are classes in every other way. An error class extends only error classes, and
+  a plain class can't extend one; a `Promise<T, Base>` fails with a `Base` or any of its subclasses. Interfaces and
+  plain classes can't be a promise's error type, and there is no built-in error class.
+- **An `async` function or method** returns a `Promise<T>` or `Promise<T, E>`. In its body, `return x` (a `T`)
+  fulfils the promise, `return e` (an `E`) rejects it, and reaching the end (or `return` alone) fulfils it with the zero
+  value. Constructors aren't async. Calling an async function runs it at once, up to its first `await` that has to
+  wait, and gives its promise; without an `await` on it, it goes on by itself.
+- **`await p`** is a whole statement, only in an async function, and only in these forms:
+
+  | Form | For | Gives |
+  | --- | --- | --- |
+  | `const x = await p`, `let x = await p`, `x = await p` | a `Promise<T>` | the value |
+  | `const [v, err] = await p`, `let [v, err] = await p`, `[v, err] = await p` | a `Promise<T, E>` | the value and the error: on success `err` is `null`, on failure `v` is `T`'s zero value |
+  | `await p` | either | nothing: it only waits |
+  | `return await p` | a promise whose value fits the function's, and whose error does | settles the function's promise as `p` settled |
+
+  `_` in place of a name drops that part (`const [_, err] = await p`). `await` can't be part of a larger expression
+  (`f(await p)`), nor in a `for` loop's header: put what it gives in a variable first. An assignment's target
+  (`this.box.n`) is found once the promise settled. The `[a, b]` form takes apart only what an await gives; there are
+  no tuples otherwise.
+- **Errors are values.** There is no `try`/`catch` and no exception: a failure the code can handle is a promise's
+  error. A bug (a budget used up, a null used, a failed call) still fails the call it happens in, as everywhere, and is
+  never turned into an `E`.
+- **Types.** A `Promise<T>` goes where a `Promise<T, E>` of the same `T` is wanted (a promise that can't fail fits
+  where one may), not the other way. Promises can be kept in variables and fields and awaited more than once; one that
+  settled already gives what it settled with at once.
+- **The host's callbacks.** An async method may stand for an optional method of an interface that returns nothing
+  (`async onAction(…): Promise<void>` for `Behaviour`'s `onAction?(…): void`): the host calls it and goes on; what
+  comes after each `await` runs when the promise settles, under a fresh [budget](#budgets). A host that ignores a
+  callback's promise ignores its error too, so such a method handles its own errors.
+- There is no `.then`, `Promise.all` or `Promise.race` yet: the language has no function values.
 
 ### Classes
 
@@ -343,8 +412,9 @@ expect:
 
 - `-- want --`: what `main()`, exported by `script/main`, returns, written as `"text"`, `3`, `true`, `[1, 2]`,
   `{"key": 1}` or a class name;
-- `-- logs --`: the lines the test host module's `log` got (cases import `log`, `probe`, `Probe` and `Greeter` from
-  `"test"`);
+- `-- logs --`: the lines the test host module's `log` got (cases import `log`, `probe`, `Probe`, `Greeter`, `Hooks`,
+  the error class `ProbeError`, and `later`, `laterText` and `failLater`, whose promises the harness settles after
+  `main()` returns, in the order they were made);
 - `-- compile error --`: part of a diagnostic, usually `module:line:col: message`;
 - `-- eval error --`: part of the error `main()` fails with.
 
@@ -355,7 +425,16 @@ nominal classes; structural interfaces, `implements`, interface inheritance, opt
 aliases; zero values of every type, null arrays and maps reading as empty and refusing writes, missing keys, no
 `undefined`; arrays, maps (insertion order) and strings with their methods; imports, aliases, default imports, a module
 imported twice, classes extending another module's, unknown exports and modules, import cycles, a module's errors
-naming it, host modules and native classes, natives refused outside them; the step, depth, length and string budgets.
+naming it, host modules and native classes, natives refused outside them; the step, depth, length and string budgets;
+async functions (`async.txt`): promises settled at once and later, in order, errors passed up as values through script
+and host error classes and their subclasses, loops and branches keeping their variables across awaits (`for … of` with
+`continue` and `break`, `while`), async methods keeping `this`, `return await`, assignments to fields from an await, a
+promise awaited twice and after it settled, `Promise<T>` going where `Promise<T, E>` is wanted, an async method standing
+for an optional host callback, failures after an await, `await` of null, the 64 promises a host may hold, and every
+misuse refused when it compiles (await outside async functions, inside an expression or a `for` header, a failing
+promise not taken apart and one that can't fail taken apart, error types that aren't error classes and values that
+are, error classes extending plain classes and the reverse, returns of the wrong value or error, async methods for a
+callback that isn't optional).
 Every one is compiled to WebAssembly and run by wazero, and the browser's runtime runs them too (see
 [Script runtime](script-runtime.md#tests)). The language keeps its cases in `testdata/` so every implementation is
 tested against them.

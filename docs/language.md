@@ -5,7 +5,8 @@ two forms:
 
 - **Scripts** are whole programs: modules with classes, interfaces, functions and statements, which import each other.
   Scripts compile to WebAssembly: one module per script, which the servers run with wazero and the browser with its own
-  engine, so a script gives the same results everywhere.
+  engine, so a script gives the same results everywhere. What the host answers later (an inventory the World keeps)
+  is a promise an async function `await`s; errors are values of error classes (`Promise<T, E>`), never exceptions.
 - **Expressions** are single expressions, the part of the language that computes a value, embedded where content needs
   a small calculation.
 

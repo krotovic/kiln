@@ -26,6 +26,8 @@ type funcCtx struct {
 	loops  int
 	ctor   bool // in a constructor, where its class's readonly fields may be set
 	inInit bool // in a field's value
+	// header is set while a for loop's header is checked, where nothing may await
+	header bool
 }
 
 func (c *checker) newFuncCtx(m *moduleInfo, class *classInfo, fn *funcInfo) *funcCtx {
@@ -191,6 +193,10 @@ func (fc *funcCtx) expr(n node, want *Type) (irExpr, *Type) {
 		return fc.newExpr(n)
 	case *arrayNode:
 		return fc.array(n, want)
+	case *awaitNode:
+		fc.errorf(n.pos, "await can't be part of an expression: put what it gives in a variable first (const x = await …)")
+		fc.expr(n.x, nil)
+		return bad, typInvalid
 	}
 	fc.errorf(n.position(), "unexpected expression")
 	return bad, typInvalid

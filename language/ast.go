@@ -63,6 +63,12 @@ type arrayNode struct {
 	items []node
 }
 
+// awaitNode is await x; the checker takes it only as a statement's whole value.
+type awaitNode struct {
+	scriptExpr
+	x node
+}
+
 // typeExpr is a type as written: a name (number, string, bool, void, a class, interface or alias), Map with
 // arguments, and any number of [] after it.
 type typeExpr struct {
@@ -78,13 +84,16 @@ type stmtBase struct{ pos int }
 
 func (s stmtBase) stmtPos() int { return s.pos }
 
-// letStmt is let or const; pos is the name's.
+// letStmt is let or const; pos is the name's. A destructuring one, const [v, err] = await p, has names instead
+// of a name (with their positions), "_" for a part it drops.
 type letStmt struct {
 	stmtBase
 	name     string
 	constant bool
 	typ      *typeExpr
 	init     node
+	names    []string
+	namePos  []int
 }
 
 // assignStmt is target op value, with op one of = += -= *= /= %=, or target++ and target-- (value nil).
@@ -159,6 +168,7 @@ type funcDecl struct {
 	body     *blockStmt
 	private  bool
 	optional bool // an interface's optional method
+	async    bool
 	doc      string
 	end      int // the byte offset after it
 }
@@ -183,6 +193,7 @@ type classDecl struct {
 	methods    []*funcDecl
 	ctor       *funcDecl
 	native     bool
+	isError    bool // error class
 	doc        string
 }
 

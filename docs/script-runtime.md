@@ -66,6 +66,15 @@ _, err = inst.Call("onUpdate", ctx, language.Num(0.1))
   the script's objects, which the host holds by handle. A script's object the host got (a result, a native's argument)
   stays valid until its next call into the instance, unless it keeps it (`Instance.Keep`); `CallOn` calls one's
   methods.
+- **Promises natives make.** A native declared to return a `Promise<T>` or `Promise<T, E>` makes one with
+  `c.NewPromise()`, returns it, and keeps its `*language.Resolver` to settle it later: `Resolve(v)` with a value of
+  `T`, or `Reject(e)` with an object of the error class `E` (a native class of its host module, `HostModule.Object`).
+  Settling runs what waited for it (the scripts' code after their `await`s) as one call from the host, under fresh
+  budgets, and returns its error like `Call`; so it must come from the goroutine that uses the instance, between its
+  calls, never from inside a native. A promise settles once; settling it again, or after the instance closed, does
+  nothing. An instance holds at most `MaxPendingPromises` (64) promises its natives made and the host hasn't settled:
+  `NewPromise` fails past that. An async method the host calls returns a promise the host doesn't see (`Call`
+  answers nothing for it).
 - **Compiled modules.** `Script.Module()` is the script compiled to WebAssembly, its metadata included; the asset
   service stores it. `LoadScript(module, opts)` loads one against the host modules it was compiled with and makes its
   machine code, and refuses a module of another runtime version, or compiled against another definition file of a host
@@ -98,8 +107,11 @@ inst.call("onUpdate", hostObject(ui, "Context", ctx), 0.1);
 - `loadScript` compiles the module once (`WebAssembly.compileStreaming` for a fetch `Response`) and checks its metadata
   against the host modules, as `LoadScript` does. `Script.new` and `Script.call` instantiate it.
 - `Instance` has the Go instance's methods: `call`, `callOn`, `hasMethod`, `hasMethodOn`, `fieldKind`, `set`, `get`,
-  `keep`, `selfObject`. Values are `number`, `string`, `boolean`, `null`, arrays, `Map`s, `ScriptObject`s and
-  `NativeObject`s (`hostObject`). A native that throws fails the script's call with `name: message`; errors are
+  `keep`, `selfObject`. Values are `number`, `string`, `boolean`, `null`, arrays, `Map`s, `ScriptObject`s,
+  `NativeObject`s (`hostObject`) and `ScriptPromise`s.
+- A native that returns a promise makes it with `call.newPromise()`, which gives the `ScriptPromise` to return and a
+  `Resolver` (`resolve(v)`, `reject(nativeObject)`, `pending`), settled later from outside the script's calls (a
+  network answer's callback, never the native itself), as in Go; `MAX_PENDING_PROMISES` is 64. A native that throws fails the script's call with `name: message`; errors are
   `ScriptError {module, line, col, msg}`.
 - What the host does for a script it does as Go does (`go.ts`): numbers written in their shortest form (Go's
   `'f', -1`), read as `strconv.ParseFloat` reads them, `%` of fractions, and strings quoted as `%q` quotes them in
@@ -128,6 +140,20 @@ its hosts (`host.go` in Go, `game/src/engine/language` in the browser); a change
   the stack. It runs once the calls since the last collection allocated half of `MaxHeap`, and its live bytes are what
   "keeps more than `MaxHeap`" measures. Native objects are held weakly: one the script let go of is dropped, and the
   host told (`release`). Memory never shrinks, and grows to at most a little over three and a half times `MaxHeap`.
+- **Async functions** (`gen_async.go`) compile to state machines. Calling one allocates its frame, an object of a
+  hidden class that holds its variables (and, for a `for … of` that awaits, the loop's array, store and index), and its
+  promise, another hidden class's object (its state, its value, its error, the first frame waiting on it); it runs the
+  function's resume function, which restores the variables from the frame and runs the body. An `await` whose promise
+  is pending saves the variables in the frame, notes which await it is (they are numbered in order), puts the frame
+  on the promise's waiters and returns. Settling a promise queues its waiters, in the order they came; the host's
+  `__promise_resolve_*` and `__promise_reject` settle a promise it made and resume the queued frames until none is
+  left (`$promise_drain`, through the table's `resume` row: a frame's class names its resume function). A resumed
+  frame goes through the body again, skipping every statement while it looks for its await: a statement holding no
+  await runs only when the function isn't resuming, one holding awaits (their numbers make a range) is entered only
+  when it holds the one resumed at, an `if` takes the branch holding it without its condition, and a loop skips its
+  header and condition to reach it. Because awaits are whole statements, nothing waits in the middle of an
+  expression. The collector traces frames and promises like any object; what a pending promise waits for is reachable
+  from the host's handle of the promise it made, so nothing waiting is collected.
 - **Calls.** Functions are WebAssembly functions, methods take the object first. A method call on a class that no class
   derived from it overrides is a direct call; the others, and calls and field reads through interfaces, go through one
   function table, a row per name and signature with an entry per class.
@@ -144,8 +170,9 @@ its hosts (`host.go` in Go, `game/src/engine/language` in the browser); a change
   runtime serves them all.
 - **Exports:** `memory`, `__init` (the module's constants, computed when it is instantiated; `CompileScript` runs it
   once, so a constant that fails is a compile error), `__begin`, `__end`, `__gc`, the runtime's helpers for hosts
-  (`__str_new`, `__arr_new`, `__map_new`, `__map_put`, the handles' `__handle_new`, `__handle_get`, `__handle_drop`, and
-  `__native_new`, `__native_get`), and for the script: `n<class>` (a new object), `c<class>` (its constructor),
+  (`__str_new`, `__arr_new`, `__map_new`, `__map_put`, the handles' `__handle_new`, `__handle_get`, `__handle_drop`,
+  `__native_new`, `__native_get`, and in a script that makes promises `__promise_new`, `__promise_resolve_f`,
+  `__promise_resolve_i` and `__promise_reject`), and for the script: `n<class>` (a new object), `c<class>` (its constructor),
   `m<class>.<method>` and `f.<function>`.
 - **Metadata,** in the custom section `alo.script` (JSON): the runtime version, the limits, the modules, the messages
   and positions, every class (its fields with their offsets, its methods with their exports and signatures), the
@@ -169,8 +196,10 @@ its hosts (`host.go` in Go, `game/src/engine/language` in the browser); a change
   error; a helper reporting its own trap, not an earlier call's error; a closed script making no instances while its
   instances keep working, and its machine code freed with the last; `LoadScript` running a module, refusing one without
   its host module, against a changed host module, of another runtime version or not a module; the same sources
-  compiling to the same bytes; errors naming their module, line and column. `bench_test.go` benchmarks a loop, method
-  calls and strings.
+  compiling to the same bytes; errors naming their module, line and column. Promises (`script_test.go`): frames waiting
+  across many collections keeping their strings and loops' arrays; resolvers refusing a value of the wrong type, a
+  rejection of a promise that can't fail and one with another class, settling once, and doing nothing after the
+  instance closed. `bench_test.go` benchmarks a loop, method calls and strings.
 - `internal/engine/wasm`: LEB128; a module written with the builder and the assembler (loops, labels, ifs with results,
   globals, loads and stores, the table, data, a custom section) validated and run by wazero, a host function calling
   back into the module; assembler errors (unknown locals, labels, instructions, functions and types, a function defined
@@ -184,7 +213,8 @@ its hosts (`host.go` in Go, `game/src/engine/language` in the browser); a change
   strings quoted exactly as Go does, over a corpus Go wrote; an instance with props, kinds, typed calls and its host's
   natives; a module refused against a changed host module or without one; the collector keeping what is held and
   refusing what wasn't kept, and "keeps more than" past the heap budget; natives with objects, arrays and maps,
-  released host objects; a timing bound.
+  released host objects; a timing bound. The async cases run with natives whose promises the test settles after
+  `main()`, in order, as Go's harness does.
 
 Automating: the client's build bundles only what its pages import, so to run the language runtime in the browser,
 start a Vite dev server and import it by path (see [Client engine](client-engine.md#tests)).

@@ -63,11 +63,14 @@ type Value struct {
 }
 
 // Num, Str and Boolean make values.
-func Num(f float64) Value   { return Value{kind: Number, num: f} }
-func Str(s string) Value    { return Value{kind: String, str: s} }
-func Boolean(b bool) Value  { return Value{kind: Bool, b: b} }
-func (v Value) Kind() Kind  { return v.kind }
-func (v Value) Valid() bool { return v.kind != 0 }
+func Num(f float64) Value  { return Value{kind: Number, num: f} }
+func Str(s string) Value   { return Value{kind: String, str: s} }
+func Boolean(b bool) Value { return Value{kind: Bool, b: b} }
+
+// ArrayOf is an array of items, for natives that return one.
+func ArrayOf(items ...Value) Value { return Value{kind: Array, ref: &arrayVal{items: items}} }
+func (v Value) Kind() Kind         { return v.kind }
+func (v Value) Valid() bool        { return v.kind != 0 }
 
 // AsNumber, AsString and AsBool return the value and whether it has that kind.
 func (v Value) AsNumber() (float64, bool) { return v.num, v.kind == Number }

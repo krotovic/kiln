@@ -17,6 +17,12 @@ type fgen struct {
 	loops  []loopLabels
 	temps  map[wasm.ValType][]uint32
 	result *Type
+	// self is the local of this (an async method's resume function keeps it in one of its own)
+	self uint32
+	// async is set in an async function's resume function; awaited is the local of the promise the await being
+	// written waited for
+	async   *asyncGen
+	awaited uint32
 }
 
 type loopLabels struct{ exit, next *wasm.Label }
@@ -192,6 +198,12 @@ func (fg *fgen) stmt(s irStmt) {
 		f.Br(fg.loops[len(fg.loops)-1].next)
 	case *irReturn:
 		fg.step(s.pos)
+		if fg.async != nil {
+			fg.settle(s.value, s.reject)
+			fg.g.leave(f)
+			f.Return()
+			return
+		}
 		if s.value != nil {
 			fg.expr(s.value)
 		}
@@ -337,7 +349,7 @@ func (fg *fgen) expr(e irExpr) {
 	case *irLocal:
 		f.LocalGet(fg.slots[e.slot])
 	case *irThis:
-		f.LocalGet(0)
+		f.LocalGet(fg.self)
 	case *irConst:
 		f.GlobalGet(fg.g.constGlbs[e.k])
 	case *irNot:
@@ -456,7 +468,7 @@ func (fg *fgen) expr(e irExpr) {
 	case *irMethod:
 		fg.method(e)
 	case *irSuper:
-		f.LocalGet(0)
+		f.LocalGet(fg.self)
 		for _, a := range e.args {
 			fg.expr(a)
 		}
@@ -504,6 +516,13 @@ func (fg *fgen) expr(e irExpr) {
 		fg.release(wasm.I32, a)
 	case *irBuiltin:
 		fg.builtin(e)
+	case *irAwaited:
+		f.LocalGet(fg.awaited)
+		if e.err {
+			f.I32Load(slotOff(promiseError))
+		} else {
+			load(f, e.t, slotOff(promiseValue))
+		}
 	default:
 		f.Unreachable()
 	}

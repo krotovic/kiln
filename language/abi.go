@@ -11,7 +11,7 @@ import (
 // game/src/engine/language): the memory layout, the imports and exports, the error codes with their messages,
 // and the metadata the module carries. A change to any of it is a new abiVersion.
 
-const abiVersion = 1
+const abiVersion = 2
 
 // metaSection is the custom section that holds a module's metadata.
 const metaSection = "alo.script"
@@ -119,12 +119,15 @@ type hostMeta struct {
 }
 
 // typeMeta is a type as the host sees it. K is n (number), s (string), b (bool), v (void), a (array of E),
-// m (map of Key to E), c (an object of class C), or i (an object of an interface).
+// m (map of Key to E), c (an object of class C), i (an object of an interface), or p (a promise of E, which
+// fails with Err).
 type typeMeta struct {
-	K    string    `json:"k"`
-	E    *typeMeta `json:"e,omitempty"`
-	Key  *typeMeta `json:"key,omitempty"`
-	C    int       `json:"c,omitempty"`
+	K   string    `json:"k"`
+	E   *typeMeta `json:"e,omitempty"`
+	Key *typeMeta `json:"key,omitempty"`
+	C   int       `json:"c,omitempty"`
+	// Err is a promise's error class (none for a promise that can't fail)
+	Err  *typeMeta `json:"err,omitempty"`
 	Name string    `json:"name"` // as messages write it
 }
 
@@ -188,6 +191,11 @@ func canon(t *Type) string {
 		return t.class.mod.id + ":" + t.class.name
 	case tIface:
 		return t.iface.mod.id + ":" + t.iface.name
+	case tPromise:
+		if t.key != nil {
+			return "Promise<" + canon(t.elem) + ", " + canon(t.key) + ">"
+		}
+		return "Promise<" + canon(t.elem) + ">"
 	}
 	return t.String()
 }
