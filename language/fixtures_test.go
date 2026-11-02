@@ -12,14 +12,14 @@ import (
 	"testing"
 )
 
-// TestWriteBrowserFixtures writes what the browser's runtime is tested against (game/src/engine/language): every
+// TestWriteBrowserFixtures writes what the browser's runtime is tested against (js/src): every
 // case of testdata/scripts that runs, compiled, with what it must give; a few scripts for instances; and how Go
-// formats and parses numbers. It runs only with ALO_LANGUAGE_FIXTURES set to the directory to write
-// (scripts/language-fixtures.mjs sets it).
+// formats and parses numbers. It runs only with KILN_FIXTURES set to the directory to write
+// (js/scripts/fixtures.mjs sets it).
 func TestWriteBrowserFixtures(t *testing.T) {
-	dir := os.Getenv("ALO_LANGUAGE_FIXTURES")
+	dir := os.Getenv("KILN_FIXTURES")
 	if dir == "" {
-		t.Skip("ALO_LANGUAGE_FIXTURES isn't set")
+		t.Skip("KILN_FIXTURES isn't set")
 	}
 	if err := os.RemoveAll(dir); err != nil {
 		t.Fatal(err)

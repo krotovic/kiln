@@ -15,7 +15,7 @@ import (
 	"github.com/tetratelabs/wazero"
 	"github.com/tetratelabs/wazero/api"
 
-	"adventurers-life-online/server/internal/engine/wasm"
+	"github.com/krotovic/kiln/wasm"
 )
 
 // The Go host of compiled scripts: one wazero runtime per process that compiles modules to machine code (on

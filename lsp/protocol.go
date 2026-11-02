@@ -85,9 +85,8 @@ type TextDocumentPositionParams struct {
 }
 
 type InitializeParams struct {
-	InitializationOptions struct {
-		Token string `json:"token"`
-	} `json:"initializationOptions"`
+	// InitializationOptions is the host's to read (Options.Authorize), such as a session token.
+	InitializationOptions json.RawMessage `json:"initializationOptions"`
 }
 
 type DidOpenParams struct {

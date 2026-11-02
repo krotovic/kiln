@@ -8,7 +8,7 @@ import (
 )
 
 // The interface between a compiled script and its host (Go's in host.go, the browser's in
-// game/src/engine/language): the memory layout, the imports and exports, the error codes with their messages,
+// js/src): the memory layout, the imports and exports, the error codes with their messages,
 // and the metadata the module carries. A change to any of it is a new abiVersion.
 
 const abiVersion = 2

@@ -1,7 +1,8 @@
-// Package lsp is the language server for scripts: the editor's code editor talks the Language Server Protocol to
-// it over a WebSocket while the world is in build mode. It reads the stored scripts from the asset service and
-// overlays each session's open documents on them, and answers with the language package's analysis
-// (diagnostics, hover, completion, definitions, signatures, symbols, references, renames, formatting).
+// Package lsp is a language server for the language: an editor talks the Language Server Protocol to it over a
+// WebSocket. It reads the stored scripts from its host and overlays each session's open documents on them, and
+// answers with the language package's analysis (diagnostics, hover, completion, definitions, signatures, symbols,
+// references, renames, formatting). What a host knows (who may connect, which IDs name scripts, its host modules)
+// comes in through Options.
 package lsp
 
 import (
@@ -15,61 +16,114 @@ import (
 	"sync"
 	"time"
 
-	"adventurers-life-online/server/internal/engine/language"
-	"adventurers-life-online/server/internal/game/zones"
-	"adventurers-life-online/server/pkg/auth"
-	"adventurers-life-online/server/pkg/transport"
 	"github.com/gorilla/websocket"
+	"github.com/krotovic/kiln/language"
 )
 
-// Scripts are the stored scripts a server reads: the asset service's, through a scripting.Library.
+// Scripts are the stored scripts the server reads.
 type Scripts interface {
 	language.Source
 	List() []string
+	// Version changes whenever the stored scripts do, so sessions republish their diagnostics.
 	Version() uint64
 }
 
+// Grant is what Authorize lets a session do. Check runs every Options.Watch and ends the session once it fails (a
+// revoked or expired token, say).
+type Grant interface {
+	Check() error
+}
+
 const (
-	// uriPrefix starts every document's URI: alo:/script/<slug>, and alo:/host/<name> for a host module's
-	// definition file (read-only)
-	uriPrefix  = "alo:/"
 	hostPrefix = "host/"
 	// maxDocuments is how many documents one session may have open
 	maxDocuments = 64
 	// maxMessage bounds one message, a whole document included
 	maxMessage = 1 << 20
-	// languageID names the language in Markdown code blocks, as the editor registers it
-	languageID = "alo-script"
 )
+
+// Options is what a host tells the server. Only Scripts is needed.
+type Options struct {
+	Scripts Scripts
+	// Hosts are the host modules scripts are checked against; their definition files open read-only at
+	// <scheme>:/host/<name>.
+	Hosts []*language.HostModule
+	// Authorize checks initialize's initializationOptions; an error ends the session with its message. Nil
+	// lets every session in.
+	Authorize func(initializationOptions json.RawMessage) (Grant, error)
+	// ValidModule reports whether an ID names a script (nil: any ID but empty).
+	ValidModule func(id string) bool
+	// Scheme starts every document's URI, <scheme>:/<module ID>, and names the server's own method,
+	// <scheme>/source (default "kiln").
+	Scheme string
+	// LanguageID names the language in Markdown code blocks, as the editor registers it (default "kiln").
+	LanguageID string
+	// Name is the serverInfo name initialize answers (default "kiln-lsp").
+	Name string
+	// Upgrader upgrades HTTP requests to WebSockets in ServeHTTP (default: a websocket.Upgrader with its defaults,
+	// which accepts only same-origin requests).
+	Upgrader *websocket.Upgrader
+	// Debounce is how long diagnostics wait for typing to pause (default 200 ms).
+	Debounce time.Duration
+	// Watch is how often sessions check for changed scripts and their grant (default 2 s).
+	Watch time.Duration
+	// InitTimeout is how long a socket may wait before initialize (default 10 s).
+	InitTimeout time.Duration
+}
 
 // Server answers language server sessions, one per WebSocket.
 type Server struct {
-	scripts Scripts
-	tokens  *auth.TokenManager
-	// revoked reports whether a session token was revoked since it was issued (nil: none are)
-	revoked  func(*auth.SessionClaims) bool
-	hosts    []*language.HostModule
-	debounce time.Duration // how long diagnostics wait for typing to pause
-	watch    time.Duration // how often sessions check for changed scripts and revoked or expired tokens
-	// initTimeout is how long a socket may wait before initialize
-	initTimeout time.Duration
+	opts      Options
+	uriPrefix string
 }
 
-// NewServer makes a server over the stored scripts, checking scripts against hosts.
-func NewServer(scripts Scripts, tokens *auth.TokenManager, revoked func(*auth.SessionClaims) bool, hosts []*language.HostModule) *Server {
-	if revoked == nil {
-		revoked = func(*auth.SessionClaims) bool { return false }
+// NewServer makes a server with opts.
+func NewServer(opts Options) *Server {
+	if opts.Authorize == nil {
+		opts.Authorize = func(json.RawMessage) (Grant, error) { return openGrant{}, nil }
 	}
-	return &Server{scripts: scripts, tokens: tokens, revoked: revoked, hosts: hosts, debounce: 200 * time.Millisecond,
-		watch: 2 * time.Second, initTimeout: 10 * time.Second}
+	if opts.ValidModule == nil {
+		opts.ValidModule = func(id string) bool { return id != "" }
+	}
+	if opts.Scheme == "" {
+		opts.Scheme = "kiln"
+	}
+	if opts.LanguageID == "" {
+		opts.LanguageID = "kiln"
+	}
+	if opts.Name == "" {
+		opts.Name = "kiln-lsp"
+	}
+	if opts.Upgrader == nil {
+		opts.Upgrader = &websocket.Upgrader{}
+	}
+	if opts.Debounce == 0 {
+		opts.Debounce = 200 * time.Millisecond
+	}
+	if opts.Watch == 0 {
+		opts.Watch = 2 * time.Second
+	}
+	if opts.InitTimeout == 0 {
+		opts.InitTimeout = 10 * time.Second
+	}
+	return &Server{opts: opts, uriPrefix: opts.Scheme + ":/"}
 }
 
-// ServeHTTP upgrades /lsp to a WebSocket and serves one session on it until it closes.
+type openGrant struct{}
+
+func (openGrant) Check() error { return nil }
+
+// ServeHTTP upgrades the request to a WebSocket and serves one session on it until it closes.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	conn, err := transport.Upgrader.Upgrade(w, r, nil)
+	conn, err := s.opts.Upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		return
 	}
+	s.ServeConn(conn)
+}
+
+// ServeConn serves one session on a WebSocket until it closes.
+func (s *Server) ServeConn(conn *websocket.Conn) {
 	conn.SetReadLimit(maxMessage)
 	ss := &session{srv: s, conn: conn, docs: map[string]*document{}, done: make(chan struct{})}
 	ss.run()
@@ -88,7 +142,7 @@ type session struct {
 
 	mu          sync.Mutex // guards what follows
 	docs        map[string]*document
-	claims      *auth.SessionClaims
+	grant       Grant // set by initialize
 	timer       *time.Timer
 	seenVersion uint64
 	closed      bool
@@ -99,7 +153,7 @@ func (ss *session) run() {
 	defer ss.close()
 	go ss.watch()
 	// A socket that never initializes doesn't hold a session open
-	_ = ss.conn.SetReadDeadline(time.Now().Add(ss.srv.initTimeout))
+	_ = ss.conn.SetReadDeadline(time.Now().Add(ss.srv.opts.InitTimeout))
 	for {
 		_, data, err := ss.conn.ReadMessage()
 		if err != nil {
@@ -147,10 +201,9 @@ func (ss *session) close() {
 	_ = ss.conn.Close()
 }
 
-// watch republishes diagnostics when the stored scripts change, and ends the session when its token is
-// revoked.
+// watch republishes diagnostics when the stored scripts change, and ends the session when its grant fails.
 func (ss *session) watch() {
-	ticker := time.NewTicker(ss.srv.watch)
+	ticker := time.NewTicker(ss.srv.opts.Watch)
 	defer ticker.Stop()
 	for {
 		select {
@@ -159,18 +212,15 @@ func (ss *session) watch() {
 		case <-ticker.C:
 		}
 		ss.mu.Lock()
-		claims := ss.claims
-		changed := claims != nil && ss.srv.scripts.Version() != ss.seenVersion
+		grant := ss.grant
+		changed := grant != nil && ss.srv.opts.Scripts.Version() != ss.seenVersion
 		ss.mu.Unlock()
-		if claims != nil && ss.srv.revoked(claims) {
-			log.Printf("[LSP] Ending %s's session: their token was revoked", claims.Email)
-			_ = ss.conn.Close()
-			return
-		}
-		if claims != nil && claims.ExpiresAt != nil && time.Now().After(claims.ExpiresAt.Time) {
-			log.Printf("[LSP] Ending %s's session: their token expired", claims.Email)
-			_ = ss.conn.Close()
-			return
+		if grant != nil {
+			if err := grant.Check(); err != nil {
+				log.Printf("[LSP] Ending a session: %v", err)
+				_ = ss.conn.Close()
+				return
+			}
 		}
 		if changed {
 			ss.schedule()
@@ -182,7 +232,7 @@ func (ss *session) watch() {
 func (ss *session) handle(msg *message) bool {
 	isRequest := len(msg.ID) > 0
 	ss.mu.Lock()
-	initialized := ss.claims != nil
+	initialized := ss.grant != nil
 	ss.mu.Unlock()
 	if !initialized {
 		switch {
@@ -228,7 +278,7 @@ func (ss *session) handle(msg *message) bool {
 		result, err = ss.rename(msg.Params)
 	case "textDocument/formatting":
 		result, err = ss.formatting(msg.Params)
-	case "alo/source":
+	case ss.srv.opts.Scheme + "/source":
 		result, err = ss.sourceOf(msg.Params)
 	default:
 		if isRequest {
@@ -285,22 +335,21 @@ func invalidParams(err error) error {
 	return &rpcError{Code: codeInvalidParams, Message: "bad params: " + err.Error()}
 }
 
-// initialize checks the session token (a game master's, with world.edit, not revoked) and answers what the
-// server can do. A session that fails it ends.
+// initialize asks the host to authorize the session and answers what the server can do. A session that fails it
+// ends.
 func (ss *session) initialize(msg *message) bool {
 	var p InitializeParams
 	_ = json.Unmarshal(msg.Params, &p)
-	claims, err := ss.srv.tokens.ValidateToken(p.InitializationOptions.Token)
-	if err != nil || claims.Issuer != auth.SessionTokenIssuer || ss.srv.revoked(claims) {
-		ss.replyError(msg.ID, codeInvalidRequest, "a session token is needed (initializationOptions.token)")
-		return false
+	grant, err := ss.srv.opts.Authorize(p.InitializationOptions)
+	if err == nil && grant == nil {
+		err = fmt.Errorf("the session wasn't authorized")
 	}
-	if !claims.Can(auth.PermWorldEdit) {
-		ss.replyError(msg.ID, codeInvalidRequest, "editing scripts needs the "+auth.PermWorldEdit+" permission")
+	if err != nil {
+		ss.replyError(msg.ID, codeInvalidRequest, err.Error())
 		return false
 	}
 	ss.mu.Lock()
-	ss.claims = claims
+	ss.grant = grant
 	ss.mu.Unlock()
 	_ = ss.conn.SetReadDeadline(time.Time{})
 	ss.reply(msg.ID, map[string]any{
@@ -315,26 +364,26 @@ func (ss *session) initialize(msg *message) bool {
 			"renameProvider":             map[string]any{"prepareProvider": true},
 			"documentFormattingProvider": true,
 		},
-		"serverInfo": map[string]any{"name": "alo-lsp"},
+		"serverInfo": map[string]any{"name": ss.srv.opts.Name},
 	})
 	return true
 }
 
 // moduleOf turns a document URI into its module ID: a script's, or a host module's name.
 func (ss *session) moduleOf(uri string) (string, error) {
-	id, ok := strings.CutPrefix(uri, uriPrefix)
+	id, ok := strings.CutPrefix(uri, ss.srv.uriPrefix)
 	if name, isHost := strings.CutPrefix(id, hostPrefix); ok && isHost && ss.host(name) != nil {
 		return name, nil
 	}
-	if !ok || !zones.ValidScriptID(id) {
-		return "", &rpcError{Code: codeInvalidParams, Message: fmt.Sprintf("%q is not a script (alo:/script/<name>)", uri)}
+	if !ok || strings.HasPrefix(id, hostPrefix) || !ss.srv.opts.ValidModule(id) {
+		return "", &rpcError{Code: codeInvalidParams, Message: fmt.Sprintf("%q is not a script (%s<module>)", uri, ss.srv.uriPrefix)}
 	}
 	return id, nil
 }
 
 // host finds a host module by name.
 func (ss *session) host(name string) *language.HostModule {
-	for _, h := range ss.srv.hosts {
+	for _, h := range ss.srv.opts.Hosts {
 		if h.Name == name {
 			return h
 		}
@@ -344,9 +393,9 @@ func (ss *session) host(name string) *language.HostModule {
 
 func (ss *session) uriOf(module string) string {
 	if ss.host(module) != nil {
-		return uriPrefix + hostPrefix + module
+		return ss.srv.uriPrefix + hostPrefix + module
 	}
-	return uriPrefix + module
+	return ss.srv.uriPrefix + module
 }
 
 // readOnly refuses to change a host module's definition file.
@@ -357,7 +406,7 @@ func (ss *session) readOnly(module string) error {
 	return nil
 }
 
-// sourceOf answers alo/source {uri}: a document's text as the server reads it (how the editor opens a host
+// sourceOf answers <scheme>/source {uri}: a document's text as the server reads it (how the editor opens a host
 // module's definition file, which isn't an asset).
 func (ss *session) sourceOf(raw json.RawMessage) (any, error) {
 	var p TextDocumentIdentifier
@@ -385,13 +434,13 @@ func (s source) Load(id string) (string, error) {
 	if d != nil {
 		return d.text, nil
 	}
-	return s.ss.srv.scripts.Load(id)
+	return s.ss.srv.opts.Scripts.Load(id)
 }
 
 func (s source) List() []string {
 	seen := map[string]bool{}
 	var out []string
-	for _, id := range s.ss.srv.scripts.List() {
+	for _, id := range s.ss.srv.opts.Scripts.List() {
 		seen[id] = true
 		out = append(out, id)
 	}
@@ -407,7 +456,7 @@ func (s source) List() []string {
 }
 
 func (ss *session) options() language.ScriptOptions {
-	return language.ScriptOptions{Hosts: ss.srv.hosts}
+	return language.ScriptOptions{Hosts: ss.srv.opts.Hosts}
 }
 
 // textOf is a module's text: the open document's, the stored script's, or a host module's definition file.
@@ -510,14 +559,14 @@ func (ss *session) schedule() {
 	if ss.timer != nil {
 		ss.timer.Stop()
 	}
-	ss.timer = time.AfterFunc(ss.srv.debounce, ss.publish)
+	ss.timer = time.AfterFunc(ss.srv.opts.Debounce, ss.publish)
 }
 
 // publish checks every open document (each with what it imports, open ones as they are now) and sends its
 // diagnostics: a change to one module shows in the open modules that import it too.
 func (ss *session) publish() {
 	ss.mu.Lock()
-	ss.seenVersion = ss.srv.scripts.Version()
+	ss.seenVersion = ss.srv.opts.Scripts.Version()
 	docs := make(map[string]document, len(ss.docs))
 	for id, d := range ss.docs {
 		docs[id] = *d
@@ -533,7 +582,7 @@ func (ss *session) publish() {
 				continue
 			}
 			start, end := t.word(t.lineCol(diag.Line, diag.Col))
-			out = append(out, Diagnostic{Range: t.rangeOf(start, end), Severity: 1, Source: "alo", Message: diag.Msg})
+			out = append(out, Diagnostic{Range: t.rangeOf(start, end), Severity: 1, Source: ss.srv.opts.Scheme, Message: diag.Msg})
 		}
 		version := d.version
 		ss.notify("textDocument/publishDiagnostics", PublishDiagnosticsParams{URI: ss.uriOf(id), Version: &version, Diagnostics: out})
@@ -576,8 +625,8 @@ func (ss *session) refAt(raw json.RawMessage, p *TextDocumentPositionParams) (la
 	return ref, t, ok, nil
 }
 
-func markdown(detail, doc string) *MarkupContent {
-	value := "```" + languageID + "\n" + detail + "\n```"
+func (ss *session) markdown(detail, doc string) *MarkupContent {
+	value := "```" + ss.srv.opts.LanguageID + "\n" + detail + "\n```"
 	if doc != "" {
 		value += "\n\n" + doc
 	}
@@ -591,7 +640,7 @@ func (ss *session) hover(raw json.RawMessage) (any, error) {
 		return nil, err
 	}
 	r := t.rangeOf(ref.Start, ref.End)
-	return Hover{Contents: *markdown(ref.Detail, ref.Doc), Range: &r}, nil
+	return Hover{Contents: *ss.markdown(ref.Detail, ref.Doc), Range: &r}, nil
 }
 
 // location turns a language location into an LSP one, reading its module's text.
@@ -705,7 +754,7 @@ func (ss *session) everywhere(def language.Location) (out []language.Ref, confli
 	seen := map[language.Location]bool{}
 	src := source{ss}
 	ids := src.List()
-	for _, h := range ss.srv.hosts {
+	for _, h := range ss.srv.opts.Hosts {
 		ids = append(ids, h.Name) // the definition files name what they declare too
 	}
 	for _, id := range ids {
@@ -752,12 +801,12 @@ func (ss *session) references(raw json.RawMessage) (any, error) {
 }
 
 // renamable reports whether a name can be renamed: something a script declares (not a host module's).
-func renamable(ref language.Ref) bool {
+func (ss *session) renamable(ref language.Ref) bool {
 	switch ref.Kind {
 	case language.RefModule, language.RefBuiltin, language.RefKeyword:
 		return false
 	}
-	return ref.Def != nil && zones.ValidScriptID(ref.Def.Module)
+	return ref.Def != nil && ss.host(ref.Def.Module) == nil && ss.srv.opts.ValidModule(ref.Def.Module)
 }
 
 func (ss *session) prepareRename(raw json.RawMessage) (any, error) {
@@ -766,7 +815,7 @@ func (ss *session) prepareRename(raw json.RawMessage) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !ok || !renamable(ref) {
+	if !ok || !ss.renamable(ref) {
 		return nil, &rpcError{Code: codeRequestFailed, Message: "only names that scripts declare can be renamed"}
 	}
 	if _, conflict := ss.everywhere(*ref.Def); conflict != "" {
@@ -787,7 +836,7 @@ func (ss *session) rename(raw json.RawMessage) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !ok || !renamable(ref) {
+	if !ok || !ss.renamable(ref) {
 		return nil, &rpcError{Code: codeRequestFailed, Message: "only names that scripts declare can be renamed"}
 	}
 	refs, conflict := ss.everywhere(*ref.Def)

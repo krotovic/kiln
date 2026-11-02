@@ -1,6 +1,6 @@
 package language
 
-import "adventurers-life-online/server/internal/engine/wasm"
+import "github.com/krotovic/kiln/wasm"
 
 // std compiles a call of the standard library.
 func (fg *fgen) std(e *irStd) {

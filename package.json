@@ -1,0 +1,23 @@
+{
+  "name": "@krotovic/kiln",
+  "version": "0.1.0",
+  "description": "The browser runtime of the language: runs the WebAssembly modules its Go compiler makes",
+  "type": "module",
+  "license": "MIT",
+  "repository": { "type": "git", "url": "git+https://github.com/krotovic/kiln.git" },
+  "exports": {
+    ".": { "types": "./js/dist/index.d.ts", "default": "./js/dist/index.js" }
+  },
+  "files": ["js/dist"],
+  "scripts": {
+    "build": "tsc -p js/tsconfig.build.json",
+    "prepare": "npm run build",
+    "typecheck": "tsc -p js/tsconfig.json",
+    "test": "node js/scripts/fixtures.mjs && node --import tsx --test \"js/src/**/*.test.ts\""
+  },
+  "devDependencies": {
+    "@types/node": "^20.12.7",
+    "tsx": "^4.23.15",
+    "typescript": "^5.4.5"
+  }
+}

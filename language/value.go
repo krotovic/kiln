@@ -1,4 +1,4 @@
-// Package language is the game's language, embedded by hosts in two forms.
+// Package language is the language, embedded by hosts in two forms.
 //
 // Expressions compute a value from named inputs. An expression is compiled once against a Library of functions
 // and a Scope of the names it may use, then evaluated any number of times against an Env. Values are numbers,

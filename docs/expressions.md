@@ -1,11 +1,11 @@
 # Expressions
 
 An expression is the expression part of the [language](language-reference.md), compiled on its own and embedded
-where content needs a small calculation: today the props and fields of [prefabs](prefabs.md#prefab-expressions).
+where content needs a small calculation, such as the computed fields of a game's object templates.
 
 ## User perspective
 
-Players see what expressions compute: a herb that glows at night, a sprite as big as its prop says. An expression has
+Players see what expressions compute: in a game, a herb that glows at night, a sprite as big as its template says. An expression has
 no loops, so it finishes at once, and a failing one leaves its field as the content has it rather than breaking
 anything.
 
@@ -27,7 +27,7 @@ clamp(1 + count * 0.25, 1, 2)                → 1.5 when count is 2
   expression runs.
 - **Limits** (`Limits`; `DefaultLimits` allows 1024 characters, 32 levels of nesting and 256 parts): since nothing
   loops, evaluation visits each part at most once. `MaxString` (4096 by default) bounds every string it makes or reads.
-  Hosts may set smaller ones: prefabs allow 200 characters, 16 levels of nesting, 64 parts, and strings of at most 256
+  Hosts may set smaller ones, such as 200 characters, 16 levels of nesting, 64 parts, and strings of at most 256
   characters.
 - **Folding:** parts without names are computed once at compile time: `2 * 3 + str(1)` compiles to `"61"`. A constant
   part that fails, such as `1 / 0`, is kept and fails when evaluated.
@@ -77,7 +77,7 @@ v, err := prog.Eval(language.MapEnv{"level": language.Num(3), "progress": langua
 
 ### Tests
 
-`server/internal/engine/language/testdata/cases.json` holds the expression cases, shared by every implementation (a
+`language/testdata/cases.json` holds the expression cases, shared by every implementation (a
 TypeScript port on the client would run the same file, as `movement.json` is shared). Each case has:
 
 - `src`: the expression, compiled with the standard library and a scope of `env`'s keys plus `scope`.

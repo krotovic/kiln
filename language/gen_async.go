@@ -1,7 +1,7 @@
 package language
 
 import (
-	"adventurers-life-online/server/internal/engine/wasm"
+	"github.com/krotovic/kiln/wasm"
 )
 
 // Async functions compile to state machines. Calling one makes its frame, an object of a hidden class that keeps

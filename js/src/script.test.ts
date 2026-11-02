@@ -14,8 +14,8 @@ import {
   type Value,
 } from "./script.js";
 
-// The fixtures are the Go compiler's: the shared cases (server/internal/engine/language/testdata/scripts) compiled to
-// WebAssembly, and how Go formats and parses numbers (scripts/language-fixtures.mjs writes them before the tests).
+// The fixtures are the Go compiler's: the shared cases (language/testdata/scripts) compiled to
+// WebAssembly, and how Go formats and parses numbers (js/scripts/fixtures.mjs writes them before the tests).
 interface Fixtures {
   cases: { name: string; module: string; want?: string; logs?: string; eval?: string }[];
   modules: Record<string, string>;

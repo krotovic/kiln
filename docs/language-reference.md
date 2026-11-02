@@ -1,45 +1,39 @@
 # The language
 
-The game has one language (`server/internal/engine/language`), a statically typed subset of TypeScript. It is used in
-two forms:
+Kiln (`language/`) is a statically typed subset of TypeScript for embedding in hosts. It is used in two forms:
 
 - **Scripts** are whole programs: modules with classes, interfaces, functions and statements, which import each other.
 - **Expressions** are single expressions, the part of the language that computes a value, embedded where content needs
   a small calculation (see [Expressions](expressions.md)).
 
-Scripts compile to WebAssembly: one module per script, which the servers run with wazero and the browser with its own
+Scripts compile to WebAssembly: one module per script, which servers run with wazero and the browser with its own
 engine, so a script gives the same results everywhere (see [Script runtime](script-runtime.md)).
 
 ## User perspective
 
-Players never write the language; they meet what it does: scripted objects, spawners, UIs and prefabs. What they can
-count on comes from its design goals:
+The people a host serves (the players of a game, say) never write the language; they meet what it does. What they
+can count on comes from its design goals:
 
 - **Safe.** Code reaches only what its host gives it: no I/O, no clock, nothing global. An expression has no loops, so
   it finishes at once; a script loops and recurses, but every call from the host stops after a budget of steps, nested
-  calls and memory (see [Budgets](#budgets)). A broken script stops on its own and the game goes on.
+  calls and memory (see [Budgets](#budgets)). A broken script stops on its own and the host goes on.
 - **Deterministic.** The same inputs always give the same result. The language has no random function: randomness
-  comes in only from the host, drawn from a seeded generator (`RANDOM_SEED`), such as the game's `rand()`. Maps iterate
+  comes in only from the host, drawn from a seeded generator the host offers, such as a `rand()`. Maps iterate
   in insertion order.
 - **Fast, the same everywhere.** A script compiles to one WebAssembly module, checked budgets included, which runs on
-  the servers and in the browser alike, at the speed of compiled code.
+  servers and in the browser alike, at the speed of compiled code.
 
 ## Authoring perspective
 
-Content creators write scripts in the editor's [code editor](code-editor.md) and expressions in prefabs. More of the
-design goals:
+Content creators write scripts and expressions against what their host offers. More of the design goals:
 
 - **Strictly typed.** Operators accept only the types they're meant for, and the only implicit conversion is joining
   strings with `+`, so mistakes fail loudly instead of producing `NaN` or `"undefined"`. There is no `undefined` at
   all: every value starts at its type's [zero value](#zero-values).
 - **Checked early.** Code is compiled when content is saved or uploaded, against the names, functions and modules its
   host offers. A typo is refused then, with where it is, not found when it runs.
-- **Reusable.** Nothing in the language knows about the game. Hosts embed it with their own names, functions and
-  modules: prefab expressions, script components, spawn scripts and UI scripts today; quest conditions, world-event
-  rules, loot tables or UI formulas later.
-
-Where the game uses it: [prefab expressions](prefabs.md#prefab-expressions), [Script components](scripting.md),
-[spawn scripts](spawning.md#spawn-scripts) and [UI scripts](uis.md#ui-scripts).
+- **Reusable.** Nothing in the language knows about its hosts. Hosts embed it with their own names, functions and
+  modules: in a game, say, object behaviours, spawn rules, UI scripts and computed fields of templates.
 
 A first look, two modules of a script:
 
@@ -330,11 +324,11 @@ interface Named extends Other {
 
 ### Modules
 
-A script is a set of modules, each one source file, named by an ID (in the game, a script asset's: `script/<slug>`).
+A script is a set of modules, each one source file, named by an ID (the host chooses them, such as `script/main`).
 
 - **Imports** come first: `import { A, B as C } from "script/util"` imports the names another module exports,
   `import D from "script/door"` its default export, and `import D, { e } from …` both. Besides other modules, code
-  imports the host's modules by their names (the game's are `"game"` and `"ui"`).
+  imports the host's modules by their names (the examples here use a game's `"game"`).
 - **Exports:** `export` goes before any declaration. `export default class` makes a class the default export.
 - **Declarations** at the top of a module: classes, interfaces, types, functions and constants, in any order (they may
   refer to each other). A module has no variables: state lives in objects. Its constants are numbers, strings or bools,
@@ -401,12 +395,11 @@ check costs little. Expressions have their own, smaller limits (see [Expressions
 ## Technical details
 
 How the language is embedded in Go and TypeScript, and how scripts compile to WebAssembly, is in
-[Script runtime](script-runtime.md); expressions on their own in [Expressions](expressions.md); the editor's tooling
-in [Code editor](code-editor.md).
+[Script runtime](script-runtime.md); and expressions on their own in [Expressions](expressions.md).
 
 ### Tests
 
-Scripts have their cases in `server/internal/engine/language/testdata/scripts/*.txt`, which `TestScriptCases` runs. A
+Scripts have their cases in `language/testdata/scripts/*.txt`, which `TestScriptCases` runs. A
 case starts with `=== name`, has a section per module (`-- script/main --`, `-- script/util --`…), and says what to
 expect:
 

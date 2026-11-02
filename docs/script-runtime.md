@@ -1,21 +1,20 @@
 # Script runtime
 
 Scripts compile to WebAssembly: one module per script, every module it imports and the checked budgets included,
-which the servers run with wazero and the browser with its own engine. The asset service compiles once, when a script
-is uploaded; nothing compiles at run time.
+which servers run with wazero and the browser with its own engine. A host compiles once, when a script is saved or
+uploaded; nothing compiles at run time.
 
 ## User perspective
 
-Players get scripts that behave the same on the servers and in their browser, at the speed of compiled code, and that
+Players get scripts that behave the same on servers and in their browser, at the speed of compiled code, and that
 can't stall or exhaust a server: a script runs in a sandbox of its own and stops when it uses up its budget.
 
 ## Authoring perspective
 
 Content creators never see the runtime: they write scripts (see the [language reference](language-reference.md)) and
-the asset service compiles them on upload (see [Assets](assets.md#scripts)). Hosts (the game's servers, the browser)
-offer scripts their API as host modules: definition files in the language, such as `"game"` (see
-[Scripting](scripting.md)) and `"ui"` (see [UIs](uis.md#ui-scripts)). New engine APIs (IO, networking…) arrive as more
-definition files.
+their host compiles them. Hosts (a game's servers, the browser) offer scripts their API as host modules: definition
+files in the language, such as a game's `"game"` and `"ui"`. New APIs (IO, networking…) arrive as more definition
+files.
 
 ## Technical details
 
@@ -75,8 +74,8 @@ _, err = inst.Call("onUpdate", ctx, language.Num(0.1))
   nothing. An instance holds at most `MaxPendingPromises` (64) promises its natives made and the host hasn't settled:
   `NewPromise` fails past that. An async method the host calls returns a promise the host doesn't see (`Call`
   answers nothing for it).
-- **Compiled modules.** `Script.Module()` is the script compiled to WebAssembly, its metadata included; the asset
-  service stores it. `LoadScript(module, opts)` loads one against the host modules it was compiled with and makes its
+- **Compiled modules.** `Script.Module()` is the script compiled to WebAssembly, its metadata included; the host
+  stores it. `LoadScript(module, opts)` loads one against the host modules it was compiled with and makes its
   machine code, and refuses a module of another runtime version, or compiled against another definition file of a host
   module (it records each one's hash), or whose natives the host doesn't give. `CompileScript` makes no machine code (it
   checks the constants in wazero's interpreter); a script makes it when first instantiated. `Script.Close` frees it once
@@ -84,13 +83,12 @@ _, err = inst.Call("onUpdate", ctx, language.Num(0.1))
 
 ### Embedding (TypeScript)
 
-The browser runs compiled modules with `@alo/game/engine/language/index.js` (`game/src/engine/language`, without
-three.js), the same way:
+The browser runs compiled modules with `@krotovic/kiln` (`js/src`), the same way:
 
 ```ts
-import { hostObject, loadScript, NativeObject, type HostModule } from "@alo/game/engine/language/index.js";
+import { hostObject, loadScript, NativeObject, type HostModule } from "@krotovic/kiln";
 
-const ui: HostModule = {                // the game's is uiHost (game/src/game/ui-runner.ts)
+const ui: HostModule = {                // a host module of a game's UIs
   name: "ui",
   source: uiDefinitionFile,             // optional: checked against what the script was compiled with
   natives: {
@@ -122,9 +120,9 @@ inst.call("onUpdate", hostObject(ui, "Context", ctx), 0.1);
 `CompileScript` checks a script, turns each function into a typed IR (`ir.go`: names already resolved to variables'
 slots, fields, constants and the functions calls run) and compiles the whole script, every module it imports included,
 into one WebAssembly module (`gen.go`, `gen_func.go`, `gen_builtins.go`), with only the runtime functions it uses
-(`runtime.wat`, assembled by `internal/engine/wasm`, which writes modules in the binary format and assembles a subset of
+(`runtime.wat`, assembled by `wasm`, which writes modules in the binary format and assembles a subset of
 the text format). The same sources always compile to the same bytes. `abi.go` is the interface between a module and
-its hosts (`host.go` in Go, `game/src/engine/language` in the browser); a change to it is a new `abiVersion`.
+its hosts (`host.go` in Go, `js/src/script.ts` in the browser); a change to it is a new `abiVersion`.
 
 - **Values.** Numbers are `f64`, bools `i32`, and strings, arrays, maps and objects `i32` addresses in the module's
   memory, 0 for null.
@@ -181,7 +179,7 @@ its hosts (`host.go` in Go, `game/src/engine/language` in the browser); a change
 
 ### Tests
 
-- `internal/engine/language`: the script cases of `testdata/scripts` (see
+- `language`: the script cases of `testdata/scripts` (see
   [the language's tests](language-reference.md#tests)), every one compiled to WebAssembly and run by wazero; instances
   (the default class, `Satisfies`, `New`, fields set by kind, private fields not settable, `HasMethod`, calls with typed
   arguments); an instance's kept memory bounded; one script shared by many goroutines; diagnostics collected across
@@ -200,21 +198,18 @@ its hosts (`host.go` in Go, `game/src/engine/language` in the browser); a change
   across many collections keeping their strings and loops' arrays; resolvers refusing a value of the wrong type, a
   rejection of a promise that can't fail and one with another class, settling once, and doing nothing after the
   instance closed. `bench_test.go` benchmarks a loop, method calls and strings.
-- `internal/engine/wasm`: LEB128; a module written with the builder and the assembler (loops, labels, ifs with results,
+- `wasm`: LEB128; a module written with the builder and the assembler (loops, labels, ifs with results,
   globals, loads and stores, the table, data, a custom section) validated and run by wazero, a host function calling
   back into the module; assembler errors (unknown locals, labels, instructions, functions and types, a function defined
   twice).
-- **The browser's runtime runs the same cases:** `TestWriteBrowserFixtures` (only with `ALO_LANGUAGE_FIXTURES` set; the
-  game's `npm test` sets it through `scripts/language-fixtures.mjs`) compiles every case of `testdata/scripts` that
-  runs, and a few scripts for instances, into `game/src/engine/language/fixtures/` (not committed), with how Go formats,
+- **The browser's runtime runs the same cases:** `TestWriteBrowserFixtures` (only with `KILN_FIXTURES` set; `npm test`
+  sets it through `js/scripts/fixtures.mjs`) compiles every case of `testdata/scripts` that
+  runs, and a few scripts for instances, into `js/src/fixtures/` (not committed), with how Go formats,
   parses and quotes a corpus of numbers and strings. So `npm test` needs Go.
-- `game/src/engine/language/script.test.ts`: the browser's runtime against the Go compiler's modules: every shared case
-  of `server/internal/engine/language/testdata/scripts` that runs (results, logs, errors); numbers written, read and
+- `js/src/script.test.ts`: the browser's runtime against the Go compiler's modules: every shared case
+  of `language/testdata/scripts` that runs (results, logs, errors); numbers written, read and
   strings quoted exactly as Go does, over a corpus Go wrote; an instance with props, kinds, typed calls and its host's
   natives; a module refused against a changed host module or without one; the collector keeping what is held and
   refusing what wasn't kept, and "keeps more than" past the heap budget; natives with objects, arrays and maps,
   released host objects; a timing bound. The async cases run with natives whose promises the test settles after
   `main()`, in order, as Go's harness does.
-
-Automating: the client's build bundles only what its pages import, so to run the language runtime in the browser,
-start a Vite dev server and import it by path (see [Client engine](client-engine.md#tests)).

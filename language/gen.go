@@ -11,7 +11,7 @@ import (
 	"sync"
 	"unicode"
 
-	"adventurers-life-online/server/internal/engine/wasm"
+	"github.com/krotovic/kiln/wasm"
 )
 
 // The code generator turns a checked script, every module of it, into one WebAssembly module (see abi.go for its

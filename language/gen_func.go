@@ -3,7 +3,7 @@ package language
 import (
 	"math"
 
-	"adventurers-life-online/server/internal/engine/wasm"
+	"github.com/krotovic/kiln/wasm"
 )
 
 // fgen writes the code of one function, method, constructor, or of the module constants.
