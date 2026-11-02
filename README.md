@@ -36,7 +36,7 @@ go get github.com/krotovic/kiln@latest
 import "github.com/krotovic/kiln/language"
 ```
 
-TypeScript, installed from a tag (npm builds it on install):
+TypeScript, installed from a tag. The package is TypeScript source, for a bundler (Vite, esbuild) or tsx:
 
 ```sh
 npm install github:krotovic/kiln#v0.1.0
