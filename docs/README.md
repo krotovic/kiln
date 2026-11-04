@@ -23,5 +23,6 @@ modules).
 | [The language](language-reference.md) | The reference: lexical structure, types and zero values, expressions and operators, conversions, statements, functions, classes, interfaces, modules, built-ins, budgets, errors; the script test cases |
 | [Expressions](expressions.md) | Expressions on their own: what they may use, limits, folding; embedding them in Go and in Rust; the shared expression cases |
 | [Script runtime](script-runtime.md) | Embedding scripts in Go, in TypeScript and in Rust, host modules, and compiling to WebAssembly: memory, the collector, calls, budgets, imports and exports, metadata |
+| [The compiler command](compiler.md) | `kiln compile`: compiling scripts for hosts that don't embed the Go package, in JSON |
 | [Tooling](tooling.md) | What editors and language servers use: analysis, hover, definitions, references, completion, signature help, formatting, rename |
 | [Language server](language-server.md) | The LSP server hosts embed: options, authorization, documents and URIs, methods |

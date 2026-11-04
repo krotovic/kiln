@@ -158,6 +158,9 @@ type HostModule struct {
 	Name    string
 	Source  string
 	Natives map[string]NativeFunc
+	// Declarations marks a host module given only to compile scripts for a host that runs them elsewhere (kiln
+	// compile): its natives need no code here, and fail when a script calls them
+	Declarations bool
 
 	once  sync.Once
 	mod   *moduleInfo
