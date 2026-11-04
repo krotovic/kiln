@@ -20,8 +20,8 @@ content is saved). Hosts embed it with their own names, functions and host modul
 | --- | --- |
 | `language/` | Go: lexer, parser, checker, the WebAssembly code generator, the wazero host, and the tooling (analysis, completion, signature help, formatting, rename) |
 | `language/testdata/` | The shared cases: expressions, scripts, formatting and tooling, run by every runtime |
-| `cmd/kiln/` | Go: `kiln compile`, the compiler as a command, for hosts that don't embed the Go package (Rust ones) |
-| `lsp/` | Go: a Language Server Protocol server over WebSockets for editors, with `lsptest`, a client for hosts' tests |
+| `cmd/kiln/` | Go: `kiln compile`, the compiler as a command, and `kiln lsp`, the language server on its standard streams, for hosts that don't embed the Go package (Rust ones) |
+| `lsp/` | Go: a Language Server Protocol server over WebSockets or streams for editors, with `lsptest`, a client for hosts' tests |
 | `wasm/` | Go: a WebAssembly module writer with an assembler for the text format |
 | `js/` | TypeScript: the browser runtime (`@krotovic/kiln`) |
 | `rust/` | Rust: the crate `kiln`, a runtime of compiled scripts on wasmtime and the expression interpreter, for Rust hosts (no compiler: modules come from the Go one) |
@@ -60,6 +60,13 @@ The compiler as a command, for hosts without Go in their process (see [docs/comp
 ```sh
 go install github.com/krotovic/kiln/cmd/kiln@latest
 kiln compile < request.json > response.json
+```
+
+The language server as a command, one session on its standard input and output, with the host modules as their
+definition files (see [docs/language-server.md](docs/language-server.md)):
+
+```sh
+kiln lsp -host game=game.d.als -scheme alo
 ```
 
 ## Development

@@ -1,7 +1,9 @@
-// Command kiln is the compiler for hosts that don't embed the Go package: it compiles scripts against host modules
-// given as their definition files, answering in JSON (see docs/compiler.md).
+// Command kiln is the language for hosts that don't embed the Go package: it compiles scripts against host modules
+// given as their definition files, answering in JSON (see docs/compiler.md), and serves the language server over
+// its standard input and output (see docs/language-server.md).
 //
 //	kiln compile < request.json > response.json
+//	kiln lsp [flags]
 package main
 
 import (
@@ -12,17 +14,34 @@ import (
 )
 
 const usage = `usage: kiln compile < request.json > response.json
+       kiln lsp [-host name=file.d.als]... [-scheme kiln] [-language kiln] [-name kiln-lsp] [-module regexp]
 
-Compiles scripts against host modules given as their definition files. The request and the response are JSON
-(see docs/compiler.md in https://github.com/krotovic/kiln).
+compile compiles scripts against host modules given as their definition files. The request and the response are
+JSON (see docs/compiler.md in https://github.com/krotovic/kiln).
+
+lsp serves one Language Server Protocol session on its standard input and output (see docs/language-server.md).
 `
 
 func main() {
-	if len(os.Args) != 2 || os.Args[1] != "compile" {
+	if len(os.Args) < 2 {
 		fmt.Fprint(os.Stderr, usage)
 		os.Exit(2)
 	}
-	if err := run(os.Stdin, os.Stdout); err != nil {
+	var err error
+	switch os.Args[1] {
+	case "compile":
+		if len(os.Args) != 2 {
+			fmt.Fprint(os.Stderr, usage)
+			os.Exit(2)
+		}
+		err = run(os.Stdin, os.Stdout)
+	case "lsp":
+		err = serveLSP(os.Args[2:], os.Stdin, os.Stdout, os.Stderr)
+	default:
+		fmt.Fprint(os.Stderr, usage)
+		os.Exit(2)
+	}
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "kiln: %v\n", err)
 		os.Exit(1)
 	}
