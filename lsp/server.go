@@ -1,5 +1,5 @@
 // Package lsp is a language server for the language: an editor talks the Language Server Protocol to it over a
-// WebSocket. It reads the stored scripts from its host and overlays each session's open documents on them, and
+// WebSocket or a byte stream (a process's standard input and output). It reads the stored scripts from its host and overlays each session's open documents on them, and
 // answers with the language package's analysis (diagnostics, hover, completion, definitions, signatures, symbols,
 // references, renames, formatting). What a host knows (who may connect, which IDs name scripts, its host modules)
 // comes in through Options.
@@ -8,6 +8,7 @@ package lsp
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"sort"
@@ -67,8 +68,11 @@ type Options struct {
 	Debounce time.Duration
 	// Watch is how often sessions check for changed scripts and their grant (default 2 s).
 	Watch time.Duration
-	// InitTimeout is how long a socket may wait before initialize (default 10 s).
+	// InitTimeout is how long a session may wait before initialize (default 10 s).
 	InitTimeout time.Duration
+	// Notifications are the host's own notifications, by method: the server hands their params to them, before
+	// initialize as after it, and answers nothing. A request with one of these methods is refused.
+	Notifications map[string]func(params json.RawMessage)
 }
 
 // Server answers language server sessions, one per WebSocket.
@@ -125,6 +129,17 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // ServeConn serves one session on a WebSocket until it closes.
 func (s *Server) ServeConn(conn *websocket.Conn) {
 	conn.SetReadLimit(maxMessage)
+	s.Serve(wsConn{conn})
+}
+
+// ServeStream serves one session on a byte stream, framed as the Language Server Protocol's base protocol (each
+// message after its Content-Length header), until in ends or the session does.
+func (s *Server) ServeStream(in io.Reader, out io.Writer) {
+	s.Serve(NewStreamConn(in, out))
+}
+
+// Serve serves one session on conn until it closes or the session ends, which closes it.
+func (s *Server) Serve(conn Conn) {
 	ss := &session{srv: s, conn: conn, docs: map[string]*document{}, done: make(chan struct{})}
 	ss.run()
 }
@@ -137,7 +152,7 @@ type document struct {
 
 type session struct {
 	srv     *Server
-	conn    *websocket.Conn
+	conn    Conn
 	writeMu sync.Mutex
 
 	mu          sync.Mutex // guards what follows
@@ -152,12 +167,43 @@ type session struct {
 func (ss *session) run() {
 	defer ss.close()
 	go ss.watch()
-	// A socket that never initializes doesn't hold a session open
-	_ = ss.conn.SetReadDeadline(time.Now().Add(ss.srv.opts.InitTimeout))
+	// A session that never initializes isn't held open
+	initTimer := time.AfterFunc(ss.srv.opts.InitTimeout, func() {
+		ss.mu.Lock()
+		initialized := ss.grant != nil
+		ss.mu.Unlock()
+		if !initialized {
+			ss.close()
+		}
+	})
+	defer initTimer.Stop()
+	// Messages are read apart, so a session that ends (its grant failing, or no initialize) returns at once even
+	// on a transport whose Close can't interrupt a read
+	in := make(chan []byte)
+	go func() {
+		defer close(in)
+		for {
+			data, err := ss.conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			select {
+			case in <- data:
+			case <-ss.done:
+				return
+			}
+		}
+	}()
 	for {
-		_, data, err := ss.conn.ReadMessage()
-		if err != nil {
+		var data []byte
+		select {
+		case <-ss.done:
 			return
+		case d, ok := <-in:
+			if !ok {
+				return
+			}
+			data = d
 		}
 		var msg message
 		if err := json.Unmarshal(data, &msg); err != nil {
@@ -218,7 +264,7 @@ func (ss *session) watch() {
 		if grant != nil {
 			if err := grant.Check(); err != nil {
 				log.Printf("[LSP] Ending a session: %v", err)
-				_ = ss.conn.Close()
+				ss.close()
 				return
 			}
 		}
@@ -231,6 +277,14 @@ func (ss *session) watch() {
 // handle answers one request or notification; false ends the session.
 func (ss *session) handle(msg *message) bool {
 	isRequest := len(msg.ID) > 0
+	if notify, ok := ss.srv.opts.Notifications[msg.Method]; ok {
+		if isRequest {
+			ss.replyError(msg.ID, codeInvalidRequest, msg.Method+" is a notification")
+		} else {
+			notify(msg.Params)
+		}
+		return true
+	}
 	ss.mu.Lock()
 	initialized := ss.grant != nil
 	ss.mu.Unlock()
@@ -312,8 +366,7 @@ func (ss *session) send(v any) {
 	}
 	ss.writeMu.Lock()
 	defer ss.writeMu.Unlock()
-	_ = ss.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-	_ = ss.conn.WriteMessage(websocket.TextMessage, data)
+	_ = ss.conn.WriteMessage(data)
 }
 
 func (ss *session) reply(id json.RawMessage, result any) {
@@ -351,7 +404,6 @@ func (ss *session) initialize(msg *message) bool {
 	ss.mu.Lock()
 	ss.grant = grant
 	ss.mu.Unlock()
-	_ = ss.conn.SetReadDeadline(time.Time{})
 	ss.reply(msg.ID, map[string]any{
 		"capabilities": map[string]any{
 			"textDocumentSync":           map[string]any{"openClose": true, "change": 1},

@@ -1,9 +1,10 @@
-// Package lsptest is a test's end of a language server session: a client over a WebSocket that sends requests and
-// notifications and waits for answers and diagnostics. Hosts use it to test the server they configure.
+// Package lsptest is a test's end of a language server session: a client over a WebSocket or a stream that sends
+// requests and notifications and waits for answers and diagnostics. Hosts use it to test the server they configure.
 package lsptest
 
 import (
 	"encoding/json"
+	"io"
 	"strconv"
 	"testing"
 	"time"
@@ -30,7 +31,7 @@ type Error struct {
 // Client is one session.
 type Client struct {
 	t      testing.TB
-	conn   *websocket.Conn
+	conn   lsp.Conn
 	nextID int
 	// In has every message the server sends that Call and Diagnostics haven't taken; it closes with the session.
 	In chan Message
@@ -45,11 +46,22 @@ func Dial(t testing.TB, url string) *Client {
 	if err != nil {
 		t.Fatal(err)
 	}
+	return New(t, wsConn{conn})
+}
+
+// Stream opens a session on a stream (a server's standard output and input, say): messages framed by their
+// Content-Length header, read from in and written to out, closed when the test ends.
+func Stream(t testing.TB, in io.Reader, out io.Writer) *Client {
+	return New(t, lsp.NewStreamConn(in, out))
+}
+
+// New opens a session on conn, closed when the test ends.
+func New(t testing.TB, conn lsp.Conn) *Client {
 	c := &Client{t: t, conn: conn, In: make(chan Message, 64), Timeout: 5 * time.Second}
 	go func() {
 		defer close(c.In)
 		for {
-			_, data, err := conn.ReadMessage()
+			data, err := conn.ReadMessage()
 			if err != nil {
 				return
 			}
@@ -62,9 +74,23 @@ func Dial(t testing.TB, url string) *Client {
 	return c
 }
 
+// wsConn is a WebSocket as an lsp.Conn.
+type wsConn struct{ conn *websocket.Conn }
+
+func (c wsConn) ReadMessage() ([]byte, error) {
+	_, data, err := c.conn.ReadMessage()
+	return data, err
+}
+
+func (c wsConn) WriteMessage(data []byte) error {
+	return c.conn.WriteMessage(websocket.TextMessage, data)
+}
+
+func (c wsConn) Close() error { return c.conn.Close() }
+
 func (c *Client) send(v any) {
 	data, _ := json.Marshal(v)
-	if err := c.conn.WriteMessage(websocket.TextMessage, data); err != nil {
+	if err := c.conn.WriteMessage(data); err != nil {
 		c.t.Fatal(err)
 	}
 }
