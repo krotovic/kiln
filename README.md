@@ -20,6 +20,7 @@ content is saved). Hosts embed it with their own names, functions and host modul
 | --- | --- |
 | `language/` | Go: lexer, parser, checker, the WebAssembly code generator, the wazero host, and the tooling (analysis, completion, signature help, formatting, rename) |
 | `language/testdata/` | The shared cases: expressions, scripts, formatting and tooling, run by every runtime |
+| `cmd/kiln/` | Go: `kiln compile`, the compiler as a command, for hosts that don't embed the Go package (Rust ones) |
 | `lsp/` | Go: a Language Server Protocol server over WebSockets for editors, with `lsptest`, a client for hosts' tests |
 | `wasm/` | Go: a WebAssembly module writer with an assembler for the text format |
 | `js/` | TypeScript: the browser runtime (`@krotovic/kiln`) |
@@ -52,6 +53,13 @@ Rust, from a tag or a commit (the crate is in `rust/`; Cargo finds it):
 
 ```toml
 kiln = { git = "https://github.com/krotovic/kiln", tag = "v0.1.0" }
+```
+
+The compiler as a command, for hosts without Go in their process (see [docs/compiler.md](docs/compiler.md)):
+
+```sh
+go install github.com/krotovic/kiln/cmd/kiln@latest
+kiln compile < request.json > response.json
 ```
 
 ## Development

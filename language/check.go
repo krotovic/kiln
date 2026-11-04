@@ -318,10 +318,18 @@ func (c *checker) declare(m *moduleInfo) {
 	}
 }
 
+// declaredOnly stands for the natives of a host module given as declarations: compiling never calls them.
+func declaredOnly(*Call, Value, []Value) (Value, error) {
+	return Value{}, errors.New("a native of a host module given as declarations only")
+}
+
 // native finds the host's code for a native declaration of a host module.
 func (c *checker) native(m *moduleInfo, name string, pos int) NativeFunc {
 	if m.host == nil {
 		return nil
+	}
+	if m.host.Declarations {
+		return declaredOnly
 	}
 	fn := m.host.Natives[name]
 	if fn == nil {

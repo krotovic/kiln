@@ -48,9 +48,10 @@ _, err = inst.Call("onUpdate", ctx, language.Num(0.1))
 - **Host modules** are how a host offers scripts its API. Each is a **definition file** in the language: only
   interfaces, types, and `native` classes and functions, with no bodies or constants; their code is Go (`Natives`, by
   `"f"`, `"C.method"` and `"C.field"`). Native fields are readonly; scripts can't make or extend a native class. A host
-  module is checked once, imports nothing, and must give every native it declares. Tools treat it like a module: its
-  declarations are where go to definition leads, and `Analyze(name, …)` reads it on its own (hover and the outline in
-  it).
+  module is checked once, imports nothing, and must give every native it declares, unless it is given as
+  `Declarations` only: to compile scripts for a host that runs them elsewhere (as [`kiln compile`](compiler.md) does),
+  where its natives need no code and fail if a script calls one. Tools treat it like a module: its declarations are
+  where go to definition leads, and `Analyze(name, …)` reads it on its own (hover and the outline in it).
 - **Interfaces for other runtimes.** `HostModule.Interfaces()` describes every interface a host module exports
   (`Interface.Meta()`: its members in order, each method's or field's type as `Satisfies` compares it and as messages
   write it), as JSON for the runtimes without the checker: the Rust one checks a class against it by the same rules.

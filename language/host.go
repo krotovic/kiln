@@ -191,7 +191,10 @@ func readScript(module []byte, opts ScriptOptions) (*Script, error) {
 	for _, nm := range meta.Natives {
 		h := hosts[nm.Host]
 		var fn NativeFunc
-		if h != nil {
+		switch {
+		case h != nil && h.Declarations:
+			fn = declaredOnly
+		case h != nil:
 			fn = h.Natives[nm.Name]
 		}
 		if fn == nil {
