@@ -12,11 +12,12 @@ import (
 	"testing"
 )
 
-// TestWriteBrowserFixtures writes what the browser's runtime is tested against (js/src): every
-// case of testdata/scripts that runs, compiled, with what it must give; a few scripts for instances; and how Go
-// formats and parses numbers. It runs only with KILN_FIXTURES set to the directory to write
-// (js/scripts/fixtures.mjs sets it).
-func TestWriteBrowserFixtures(t *testing.T) {
+// TestWriteRuntimeFixtures writes what the other runtimes are tested against (the browser's in js/src, the Rust
+// one in rust/): every case of testdata/scripts that runs, compiled, with what it must give; a few scripts for
+// instances; the host modules' interfaces with what Satisfies says of classes against them; and how Go formats
+// and parses numbers. It runs only with KILN_FIXTURES set to the directory to write (js/scripts/fixtures.mjs and
+// the Rust tests set it).
+func TestWriteRuntimeFixtures(t *testing.T) {
 	dir := os.Getenv("KILN_FIXTURES")
 	if dir == "" {
 		t.Skip("KILN_FIXTURES isn't set")
@@ -161,6 +162,76 @@ export default class User {
 		modules[name] = write(name, s)
 	}
 
+	// Interfaces, and what Satisfies says of classes against them
+	interfaces := map[string]map[string]InterfaceMeta{}
+	behaviour := &HostModule{Name: "host", Source: behaviourHost, Natives: map[string]NativeFunc{
+		"log": func(*Call, Value, []Value) (Value, error) { return Value{}, nil }}}
+	for _, h := range []*HostModule{probeHost, behaviour, objectHost()} {
+		metas, err := h.Interfaces()
+		if err != nil {
+			t.Fatal(err)
+		}
+		interfaces[h.Name] = metas
+	}
+	type satisfiesCase struct {
+		Module    string `json:"module"`
+		Host      string `json:"host"`
+		Interface string `json:"interface"`
+		Why       string `json:"why"`
+	}
+	var satisfies []satisfiesCase
+	classes := []struct{ src, iface string }{
+		{`export default class G { greet(name: string): string { return name } }`, "Greeter"},
+		{`export default class G { greet(name: string): string { return name }
+  hello(): string { return "hi" } }`, "Greeter"},
+		{`export default class G { hello(): string { return "hi" } }`, "Greeter"},
+		{`export default class G { private greet(name: string): string { return name } }`, "Greeter"},
+		{`export default class G { greet(n: number): string { return "" } }`, "Greeter"},
+		{`export default class G { greet = "x" }`, "Greeter"},
+		{`export default class G { greet(name: string): string { return name }
+  hello = "hi" }`, "Greeter"},
+		{`export default class G { greet(name: string): string { return name }
+  hello(): number { return 1 } }`, "Greeter"},
+		{`export default class H { run(): void {} }`, "Hooks"},
+		{`export default class H { async ready(): Promise<void> {} run(): void {} }`, "Hooks"},
+		{`export default class H { ready(): number { return 1 } run(): void {} }`, "Hooks"},
+		{`export default class H { async run(): Promise<void> {} }`, "Hooks"},
+	}
+	for i, c := range classes {
+		src := "import { Greeter, Hooks } from \"test\"\n" + c.src
+		s, diags := CompileScript("script/main", MapSource{"script/main": src}, ScriptOptions{Hosts: []*HostModule{probeHost}})
+		if len(diags) > 0 {
+			t.Fatalf("class %d: %v", i, DiagnosticsError(diags))
+		}
+		class, _ := s.DefaultClass()
+		iface, err := probeHost.Interface(c.iface)
+		if err != nil {
+			t.Fatal(err)
+		}
+		name := fmt.Sprintf("satisfies-%d", i)
+		satisfies = append(satisfies, satisfiesCase{Module: write(name, s), Host: "test", Interface: c.iface, Why: class.Satisfies(iface)})
+	}
+	for i, src := range []string{
+		`export default class N { name = "x" }`,
+		`export default class N { readonly name: string = "x" }`,
+		`export default class N { private name = "x" }`,
+		`export default class N { name = 1 }`,
+		`export default class N { name(): string { return "" } }`,
+		`export default class N { }`,
+	} {
+		s, diags := CompileScript("script/main", MapSource{"script/main": src}, ScriptOptions{Hosts: []*HostModule{objectHost()}})
+		if len(diags) > 0 {
+			t.Fatalf("field class %d: %v", i, DiagnosticsError(diags))
+		}
+		class, _ := s.DefaultClass()
+		iface, err := objectHost().Interface("Named")
+		if err != nil {
+			t.Fatal(err)
+		}
+		name := fmt.Sprintf("satisfies-field-%d", i)
+		satisfies = append(satisfies, satisfiesCase{Module: write(name, s), Host: "objects", Interface: "Named", Why: class.Satisfies(iface)})
+	}
+
 	type formatCase struct {
 		Bits string `json:"bits"` // the float64's bits, in hex, so JSON doesn't round it
 		Text string `json:"text"`
@@ -207,7 +278,7 @@ export default class User {
 		quotes[s] = quoteText(s)
 	}
 	out := map[string]any{"cases": cases, "modules": modules, "hosts": hostSources, "formats": formats, "parses": parses,
-		"quotes": quotes}
+		"quotes": quotes, "interfaces": interfaces, "satisfies": satisfies}
 	raw, err := json.MarshalIndent(out, "", " ")
 	if err != nil {
 		t.Fatal(err)

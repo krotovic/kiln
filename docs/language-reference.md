@@ -6,7 +6,7 @@ Kiln (`language/`) is a statically typed subset of TypeScript for embedding in h
 - **Expressions** are single expressions, the part of the language that computes a value, embedded where content needs
   a small calculation (see [Expressions](expressions.md)).
 
-Scripts compile to WebAssembly: one module per script, which servers run with wazero and the browser with its own
+Scripts compile to WebAssembly: one module per script, which servers run with wazero (Go) or wasmtime (Rust) and the browser with its own
 engine, so a script gives the same results everywhere (see [Script runtime](script-runtime.md)).
 
 ## User perspective
@@ -416,7 +416,8 @@ at compile time, optional semicolons, comments and escapes, recursion, the stand
 with constructors, field values, inheritance, `super`, overrides keeping their signature, private and readonly members,
 nominal classes; structural interfaces, `implements`, interface inheritance, optional methods only the host calls;
 aliases; zero values of every type, null arrays and maps reading as empty and refusing writes, missing keys, no
-`undefined`; arrays, maps (insertion order) and strings with their methods; imports, aliases, default imports, a module
+`undefined`; arrays, maps (insertion order) and strings with their methods; numbers and strings as Go has them (`-0`,
+`%` of fractions, numbers past 2^53 and below 1, `num` with `_` and hex, case mapping with Go's rules, runes); imports, aliases, default imports, a module
 imported twice, classes extending another module's, unknown exports and modules, import cycles, a module's errors
 naming it, host modules and native classes, natives refused outside them; the step, depth, length and string budgets;
 async functions (`async.txt`): promises settled at once and later, in order, errors passed up as values through script
@@ -428,6 +429,6 @@ misuse refused when it compiles (await outside async functions, inside an expres
 promise not taken apart and one that can't fail taken apart, error types that aren't error classes and values that
 are, error classes extending plain classes and the reverse, returns of the wrong value or error, async methods for a
 callback that isn't optional).
-Every one is compiled to WebAssembly and run by wazero, and the browser's runtime runs them too (see
+Every one is compiled to WebAssembly and run by wazero, and the browser's and the Rust runtime run them too (see
 [Script runtime](script-runtime.md#tests)). The language keeps its cases in `testdata/` so every implementation is
 tested against them.

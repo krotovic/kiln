@@ -1,7 +1,7 @@
 # Script runtime
 
 Scripts compile to WebAssembly: one module per script, every module it imports and the checked budgets included,
-which servers run with wazero and the browser with its own engine. A host compiles once, when a script is saved or
+which Go servers run with wazero, Rust servers with wasmtime and the browser with its own engine. A host compiles once, when a script is saved or
 uploaded; nothing compiles at run time.
 
 ## User perspective
@@ -51,6 +51,9 @@ _, err = inst.Call("onUpdate", ctx, language.Num(0.1))
   module is checked once, imports nothing, and must give every native it declares. Tools treat it like a module: its
   declarations are where go to definition leads, and `Analyze(name, …)` reads it on its own (hover and the outline in
   it).
+- **Interfaces for other runtimes.** `HostModule.Interfaces()` describes every interface a host module exports
+  (`Interface.Meta()`: its members in order, each method's or field's type as `Satisfies` compares it and as messages
+  write it), as JSON for the runtimes without the checker: the Rust one checks a class against it by the same rules.
 - **`CompileScript`** loads the entry module and everything it imports from a **`Source`** (`MapSource` for tests),
   and returns the script or its `Diagnostic`s (`{Module, Line, Col, Msg}`, which carry what an editor's language server
   needs). `ModuleImports(src)` lists a module's imports without checking it, so a host can find what depends on what.
@@ -114,6 +117,46 @@ inst.call("onUpdate", hostObject(ui, "Context", ctx), 0.1);
 - What the host does for a script it does as Go does (`go.ts`): numbers written in their shortest form (Go's
   `'f', -1`), read as `strconv.ParseFloat` reads them, `%` of fractions, and strings quoted as `%q` quotes them in
   messages. Everything else (Unicode, maps, the collector) is in the module itself.
+
+### Embedding (Rust)
+
+Rust servers run compiled modules with the crate `kiln` (`rust/`, from this repository as a Git dependency), on
+wasmtime, the same way. Rust has no compiler: modules come from the Go one (the asset service, say).
+
+```rust
+use kiln::{HostModule, Interface, Value, load_script};
+
+let game = HostModule::new("game", GAME_DEFINITION_FILE)     // the definition file the script was compiled against
+    .native("log", |call, _this, args| { … ; Ok(Value::default()) })
+    .native("Context.zone", |_call, this, _args| Ok(Value::str(this.payload::<Runner>().unwrap().zone.as_str())));
+let script = load_script(&module_bytes, &[&game])?;          // refuses a module of another runtime or definition file
+let class = script.default_class().unwrap();
+let behaviour = &Interface::parse_all(GAME_INTERFACES_JSON)?["Behaviour"]; // HostModule.Interfaces() from Go
+if let Err(why) = class.satisfies(behaviour) { … }         // why it isn't a Behaviour
+let mut inst = script.new_instance(&class, runner)?;        // runner is what natives get (call.data::<T>())
+inst.set("speed", Value::num(2.0))?;
+let ctx = game.object("Context", runner_ref);                // a native class's object, with the host's payload
+inst.call("onUpdate", &[ctx, Value::num(0.1)])?;
+```
+
+- `load_script` checks the metadata as `LoadScript` does (the runtime version, each host module's hash, every
+  native given) and compiles the module once, with one wasmtime engine for the process; `Script` is cheap to clone
+  and shared between threads. Each `Instance` is a wasmtime store of its own, and moves between threads (`Send`).
+- `Instance` has the Go instance's methods: `call`, `call_on`, `has_method`, `has_method_on`, `field_kind`, `set`,
+  `get`, `keep`, `self_object`, and `call_function` on an instance of no object (`Script::instantiate`), which keeps
+  the instance for the promises its functions wait on (`Script::call` makes one for one call). `data` and `data_mut`
+  reach what the host gave it.
+- `Value` is opaque, like Go's: `Value::num`, `str`, `bool`, `null`, `array`, `map`, `literal`, and `as_number`,
+  `as_str`, `as_bool`, `as_array`, `as_map`, `payload::<T>()` (a host object's), `kind`. Host objects keep their
+  identity (clones are the same object); script objects are held by handle, as in Go.
+- Natives are closures `Fn(&mut Call, &Value, &[Value]) -> NativeResult`, which may fail with any error: a
+  `ScriptError` passes as it is, anything else fails the call as `member: error`. `call.new_promise()` gives the
+  promise to return and a `Resolver`, settled later with `resolver.resolve(&mut inst, v)` or
+  `reject(&mut inst, e)` between the instance's calls; at most `MAX_PENDING_PROMISES` (64) wait at a time.
+- Errors are `kiln::Error`: `Script(ScriptError {module, line, col, msg})` for the script's, `Host(msg)` for the
+  host's. What the host does for a script it does as Go does (`kiln::gofmt`): numbers in their shortest form (ties
+  broken to even, as Go's `'f', -1` does), read as `strconv.ParseFloat` reads them, strings quoted as `%q` quotes
+  them.
 
 ### Compiling to WebAssembly
 
@@ -197,15 +240,18 @@ its hosts (`host.go` in Go, `js/src/script.ts` in the browser); a change to it i
   compiling to the same bytes; errors naming their module, line and column. Promises (`script_test.go`): frames waiting
   across many collections keeping their strings and loops' arrays; resolvers refusing a value of the wrong type, a
   rejection of a promise that can't fail and one with another class, settling once, and doing nothing after the
-  instance closed. `bench_test.go` benchmarks a loop, method calls and strings.
+  instance closed. `HostModule.Interfaces` describing interfaces as the other runtimes read them. `bench_test.go`
+  benchmarks a loop, method calls and strings.
 - `wasm`: LEB128; a module written with the builder and the assembler (loops, labels, ifs with results,
   globals, loads and stores, the table, data, a custom section) validated and run by wazero, a host function calling
   back into the module; assembler errors (unknown locals, labels, instructions, functions and types, a function defined
   twice).
-- **The browser's runtime runs the same cases:** `TestWriteBrowserFixtures` (only with `KILN_FIXTURES` set; `npm test`
-  sets it through `js/scripts/fixtures.mjs`) compiles every case of `testdata/scripts` that
-  runs, and a few scripts for instances, into `js/src/fixtures/` (not committed), with how Go formats,
-  parses and quotes a corpus of numbers and strings. So `npm test` needs Go.
+- **The browser's and the Rust runtime run the same cases:** `TestWriteRuntimeFixtures` (only with `KILN_FIXTURES`
+  set; `npm test` sets it through `js/scripts/fixtures.mjs`, `cargo test` from `rust/tests/runtime.rs`) compiles every
+  case of `testdata/scripts` that runs, and a few scripts for instances and for `Satisfies`, into the directory given
+  (`js/src/fixtures/`, or Cargo's test directory; not committed), with how Go formats, parses and quotes a corpus of
+  numbers and strings, the test host modules' interfaces (`HostModule.Interfaces`) and what `Satisfies` says of each
+  class. So `npm test` and `cargo test` need Go.
 - `js/src/script.test.ts`: the browser's runtime against the Go compiler's modules: every shared case
   of `language/testdata/scripts` that runs (results, logs, errors); numbers written, read and
   strings quoted exactly as Go does, over a corpus Go wrote; an instance with props, kinds, typed calls and its host's
@@ -213,3 +259,9 @@ its hosts (`host.go` in Go, `js/src/script.ts` in the browser); a change to it i
   refusing what wasn't kept, and "keeps more than" past the heap budget; natives with objects, arrays and maps,
   released host objects; a timing bound. The async cases run with natives whose promises the test settles after
   `main()`, in order, as Go's harness does.
+- `rust/tests/runtime.rs`: the Rust runtime against the same fixtures and checks as the browser's, and: classes
+  checked against interfaces with what Go's `Satisfies` said of each (missing, private, field for method, other
+  signatures, async for an optional void method, readonly and field types); resolvers refusing a value of the wrong
+  type, a rejection of a promise that can't fail and one with another class, settling once, and another instance's
+  resolver; errors naming their module, line and column; an instance moved to another thread. `src/gofmt.rs` has
+  unit tests of its own (exact ties, Go's number syntax).

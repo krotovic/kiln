@@ -236,3 +236,55 @@ func (h *HostModule) Object(class string, payload any) (Value, error) {
 	}
 	return Value{kind: Object, ref: &object{class: sym.class, payload: payload}}, nil
 }
+
+// InterfaceMeta describes an interface for hosts without this package's checker (Kiln's Rust runtime), so they
+// can tell whether a compiled script's class satisfies it by the same rules (Class.Satisfies): its members in
+// declaration order, those of the interfaces it extends included.
+type InterfaceMeta struct {
+	Name    string            `json:"name"`
+	Members []InterfaceMember `json:"members"`
+}
+
+// InterfaceMember is a method or field of an interface. Canon is its type as Satisfies compares it (a method's
+// signature, classes and interfaces named by the module that declares them), Text as messages write it.
+type InterfaceMember struct {
+	Name     string `json:"name"`
+	Method   bool   `json:"method,omitempty"`
+	Optional bool   `json:"optional,omitempty"`
+	Readonly bool   `json:"readonly,omitempty"`
+	Canon    string `json:"canon"`
+	Text     string `json:"text"`
+}
+
+// Meta describes the interface for hosts without the checker.
+func (i *Interface) Meta() InterfaceMeta {
+	info := i.info
+	out := InterfaceMeta{Name: info.name, Members: []InterfaceMember{}}
+	for _, name := range info.order {
+		if m, ok := info.methods[name]; ok {
+			out.Members = append(out.Members, InterfaceMember{Name: name, Method: true, Optional: m.optional,
+				Canon: canonSig(m), Text: m.signature()})
+			continue
+		}
+		f := info.fields[name]
+		out.Members = append(out.Members, InterfaceMember{Name: name, Readonly: f.readonly, Canon: canon(f.typ),
+			Text: f.typ.String()})
+	}
+	return out
+}
+
+// Interfaces describes every interface the host module exports, by name, for hosts without the checker
+// (Interface.Meta).
+func (h *HostModule) Interfaces() (map[string]InterfaceMeta, error) {
+	m, diags := h.module()
+	if len(diags) > 0 {
+		return nil, DiagnosticsError(diags)
+	}
+	out := map[string]InterfaceMeta{}
+	for name, sym := range m.exports {
+		if sym.kind == symIface {
+			out[name] = (&Interface{info: sym.iface}).Meta()
+		}
+	}
+	return out, nil
+}

@@ -600,3 +600,28 @@ export default class W {
 		t.Fatalf("after Close: %v", err)
 	}
 }
+
+func TestInterfacesForOtherRuntimes(t *testing.T) {
+	metas, err := probeHost.Interfaces()
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := metas["Greeter"]
+	want := []InterfaceMember{
+		{Name: "greet", Method: true, Canon: "(string): string", Text: "(name: string): string"},
+		{Name: "hello", Method: true, Optional: true, Canon: "(): string", Text: "(): string"},
+	}
+	if g.Name != "Greeter" || fmt.Sprint(g.Members) != fmt.Sprint(want) {
+		t.Fatalf("Greeter = %+v, want %+v", g, want)
+	}
+	if _, ok := metas["Hooks"]; !ok || len(metas) != 2 {
+		t.Fatalf("interfaces = %v, want Greeter and Hooks", metas)
+	}
+	named, err := objectHost().Interfaces()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m := named["Named"].Members; len(m) != 1 || m[0] != (InterfaceMember{Name: "name", Readonly: true, Canon: "string", Text: "string"}) {
+		t.Fatalf("Named = %+v", m)
+	}
+}

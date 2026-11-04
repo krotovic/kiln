@@ -3,7 +3,7 @@
 Kiln is a statically typed subset of TypeScript for embedding in hosts. It is used in two forms:
 
 - **Scripts** are whole programs: modules with classes, interfaces, functions and statements, which import each other.
-  Scripts compile to WebAssembly: one module per script, which servers run with wazero and the browser with its own
+  Scripts compile to WebAssembly: one module per script, which servers run with wazero (Go) or wasmtime (Rust) and the browser with its own
   engine, so a script gives the same results everywhere. What the host answers later (a record a database keeps)
   is a promise an async function `await`s; errors are values of error classes (`Promise<T, E>`), never exceptions.
 - **Expressions** are single expressions, the part of the language that computes a value, embedded where content needs
@@ -21,7 +21,7 @@ modules).
 | Document | What it covers |
 | --- | --- |
 | [The language](language-reference.md) | The reference: lexical structure, types and zero values, expressions and operators, conversions, statements, functions, classes, interfaces, modules, built-ins, budgets, errors; the script test cases |
-| [Expressions](expressions.md) | Expressions on their own: what they may use, limits, folding; embedding them in Go; the shared expression cases |
-| [Script runtime](script-runtime.md) | Embedding scripts in Go and in TypeScript, host modules, and compiling to WebAssembly: memory, the collector, calls, budgets, imports and exports, metadata |
+| [Expressions](expressions.md) | Expressions on their own: what they may use, limits, folding; embedding them in Go and in Rust; the shared expression cases |
+| [Script runtime](script-runtime.md) | Embedding scripts in Go, in TypeScript and in Rust, host modules, and compiling to WebAssembly: memory, the collector, calls, budgets, imports and exports, metadata |
 | [Tooling](tooling.md) | What editors and language servers use: analysis, hover, definitions, references, completion, signature help, formatting, rename |
 | [Language server](language-server.md) | The LSP server hosts embed: options, authorization, documents and URIs, methods |

@@ -44,3 +44,24 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
+
+  rust:
+    name: Rust runtime
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v7
+      # The toolchain is the one rust/rust-toolchain.toml pins
+      - run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      # The runtime's tests run scripts the Go compiler compiles
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - run: cargo fmt --check
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked
