@@ -55,6 +55,8 @@ _, err = inst.Call("onUpdate", ctx, language.Num(0.1))
 - **Interfaces for other runtimes.** `HostModule.Interfaces()` describes every interface a host module exports
   (`Interface.Meta()`: its members in order, each method's or field's type as `Satisfies` compares it and as messages
   write it), as JSON for the runtimes without the checker: the Rust one checks a class against it by the same rules.
+  `HostModule.DeclaredNatives()` lists the natives a definition file declares (`f`, `C.m`, `C.f`), the code a host
+  must give; [`kiln compile`](compiler.md) gives both for a host module named in its request's `describe`.
 - **`CompileScript`** loads the entry module and everything it imports from a **`Source`** (`MapSource` for tests),
   and returns the script or its `Diagnostic`s (`{Module, Line, Col, Msg}`, which carry what an editor's language server
   needs). `ModuleImports(src)` lists a module's imports without checking it, so a host can find what depends on what.

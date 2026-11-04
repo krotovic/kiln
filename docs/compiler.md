@@ -17,6 +17,7 @@ kiln compile < request.json > response.json
   "hosts": [{ "name": "game", "source": "export interface Behaviour { … }" }],
   "scripts": { "script/door": "import { Behaviour } from \"game\"; …", "script/util": "…" },
   "imports": ["script/door"],
+  "describe": ["game"],
   "jobs": [
     { "entry": "script/door", "hosts": ["game"], "satisfies": ["game.Behaviour"] },
     { "entry": "script/menu", "hosts": ["ui"], "refuse": { "game": "\"game\" is the servers' module" } }
@@ -31,6 +32,8 @@ kiln compile < request.json > response.json
 - **`scripts`** are the sources of every script a job may import, by ID.
 - **`imports`** lists scripts whose imports the response gives (`ModuleImports`), so a host can find what depends on
   what without compiling.
+- **`describe`** lists host modules the response describes, for a host whose runtime has no checker. A name that
+  isn't among `hosts` refuses the request.
 - **`jobs`** compile a script each: `entry` against the host modules `hosts` names (all of them when it names none).
   A module in `refuse` (and not among the job's host modules) can't be imported, with its message as the reason.
   `satisfies` names host modules' interfaces (`host.Interface`) to check the default class against. A job naming a
@@ -41,6 +44,12 @@ kiln compile < request.json > response.json
 ```json
 {
   "imports": { "script/door": ["game", "script/util"] },
+  "hosts": {
+    "game": {
+      "interfaces": { "Behaviour": { "name": "Behaviour", "members": [{ "name": "onStart", "method": true, "optional": true, "canon": "(game:Context): void", "text": "(ctx: Context): void" }] } },
+      "natives": ["Context.zone", "log"]
+    }
+  },
   "results": [
     {
       "entry": "script/door",
@@ -57,6 +66,9 @@ kiln compile < request.json > response.json
 ```
 
 - **`imports`**: each script's imports in the order it writes them (none for a script that doesn't parse).
+- **`hosts`**, the host modules `describe` names: their `interfaces` by name, as `HostModule.Interfaces()` describes
+  them (what the Rust runtime's `Interface::parse_all` reads), and the `natives` their definition files declare
+  (`HostModule.DeclaredNatives()`: `f`, `C.m`, `C.f`), the code a host must give. Left out when `describe` is.
 - **`results`**, one per job in order: the WebAssembly `module` (base64), the IDs of the script's `modules` (the
   entry and the scripts it imports, host modules aside), and the `default_class` the entry exports, if any: its name,
   how many arguments its constructor takes, and, in `unsatisfied`, why it doesn't satisfy each interface of
@@ -68,4 +80,6 @@ kiln compile < request.json > response.json
 host with its natives' code, and loads against it; the modules, the default class and the imports; diagnostics of a
 script that doesn't type-check, a refused module, a class that doesn't satisfy an interface and takes arguments, a
 missing script; requests refused (a host module that doesn't check or is given twice, an unknown host module or
-interface, an interface named without its host); JSON in and out, unknown fields refused.
+interface, an interface named without its host); host modules described (their interfaces as `Interfaces()` gives
+them, an extended one's members included, and their natives), an unknown one refused; JSON in and out, unknown
+fields refused.

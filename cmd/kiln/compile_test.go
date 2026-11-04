@@ -136,3 +136,39 @@ func TestRunSpeaksJSON(t *testing.T) {
 		t.Error("an unknown field was taken")
 	}
 }
+
+func TestCompileDescribesHostModules(t *testing.T) {
+	req := Request{
+		Hosts: []Host{{Name: "bell", Source: bellHost + `
+export interface Loud extends Ringer {
+  readonly volume: number
+}
+export native class Clapper {
+  readonly weight: number
+  swing(times: number): void
+}
+`}},
+		Describe: []string{"bell"},
+	}
+	resp, err := Compile(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := resp.Hosts["bell"]
+	if strings.Join(d.Natives, ",") != "Clapper.swing,Clapper.weight,log" {
+		t.Errorf("natives = %v", d.Natives)
+	}
+	// The interfaces as the Go package describes them, those they extend included
+	want, err := (&language.HostModule{Name: "bell", Source: req.Hosts[0].Source, Declarations: true}).Interfaces()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, _ := json.Marshal(d.Interfaces)
+	wantJSON, _ := json.Marshal(want)
+	if string(got) != string(wantJSON) || len(d.Interfaces["Loud"].Members) != 2 {
+		t.Errorf("interfaces = %s, want %s", got, wantJSON)
+	}
+	if _, err := Compile(Request{Hosts: req.Hosts, Describe: []string{"gong"}}); err == nil {
+		t.Error("an unknown host module was described")
+	}
+}

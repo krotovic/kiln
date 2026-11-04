@@ -328,6 +328,7 @@ func (c *checker) native(m *moduleInfo, name string, pos int) NativeFunc {
 	if m.host == nil {
 		return nil
 	}
+	m.natives = append(m.natives, name)
 	if m.host.Declarations {
 		return declaredOnly
 	}
