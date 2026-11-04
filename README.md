@@ -4,8 +4,9 @@ A statically typed subset of TypeScript for embedding in hosts: games, tools, an
 trust. It comes in two forms:
 
 - **Scripts** are whole programs (modules with classes, interfaces, functions and statements, which import each
-  other), compiled to WebAssembly: one module per script, run on servers with [wazero](https://wazero.io) and in the
-  browser by its own engine, so a script gives the same results everywhere.
+  other), compiled to WebAssembly: one module per script, run on servers with [wazero](https://wazero.io) (Go) or
+  [wasmtime](https://wasmtime.dev) (Rust) and in the browser by its own engine, so a script gives the same results
+  everywhere.
 - **Expressions** are single expressions embedded where content needs a small calculation.
 
 It is **safe** (code reaches only what its host gives it, under budgets of steps, nested calls and memory),
@@ -18,10 +19,11 @@ content is saved). Hosts embed it with their own names, functions and host modul
 | Path | Contents |
 | --- | --- |
 | `language/` | Go: lexer, parser, checker, the WebAssembly code generator, the wazero host, and the tooling (analysis, completion, signature help, formatting, rename) |
-| `language/testdata/` | The shared cases: expressions, scripts, formatting and tooling, run by both runtimes |
+| `language/testdata/` | The shared cases: expressions, scripts, formatting and tooling, run by every runtime |
 | `lsp/` | Go: a Language Server Protocol server over WebSockets for editors, with `lsptest`, a client for hosts' tests |
 | `wasm/` | Go: a WebAssembly module writer with an assembler for the text format |
 | `js/` | TypeScript: the browser runtime (`@krotovic/kiln`) |
+| `rust/` | Rust: the crate `kiln`, a runtime of compiled scripts on wasmtime and the expression interpreter, for Rust hosts (no compiler: modules come from the Go one) |
 | `docs/` | The language reference, expressions, the script runtime, the tooling and the language server |
 
 ## Using it
@@ -46,16 +48,23 @@ npm install github:krotovic/kiln#v0.1.0
 import { loadScript } from "@krotovic/kiln";
 ```
 
+Rust, from a tag or a commit (the crate is in `rust/`; Cargo finds it):
+
+```toml
+kiln = { git = "https://github.com/krotovic/kiln", tag = "v0.1.0" }
+```
+
 ## Development
 
 ```sh
 go vet ./... && go test ./...   # the compiler and the wasm writer
 npm install && npm test         # the browser runtime, against modules the Go compiler compiles (needs Go)
 npm run typecheck
+cd rust && cargo clippy --all-targets -- -D warnings && cargo test   # the Rust runtime (needs Go too)
 ```
 
-Run `go fmt` on all Go code. A change to the interface between compiled modules and their hosts (`language/abi.go`,
-mirrored by `js/src/script.ts`) is a new `abiVersion`.
+Run `go fmt` on all Go code and `cargo fmt` on the Rust. A change to the interface between compiled modules and their
+hosts (`language/abi.go`, mirrored by `js/src/script.ts` and `rust/src/script`) is a new `abiVersion`.
 
 ## License
 

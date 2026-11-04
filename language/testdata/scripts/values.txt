@@ -268,3 +268,19 @@ export function main(): number {
 }
 -- eval error --
 index 1 is out of range (length 1)
+
+=== numbers and strings come out as Go has them: -0, % of fractions, numbers past 2^53 and below 1, num with _ and hex, case mapping, runes
+-- script/main --
+export function main(): string[] {
+  let negZero = -4 % 2
+  return [
+    str(negZero), str(-0), str(5.5 % 2), str(-5.25 % 2), str(-5 % 3), str(1e21), str(0.1 + 0.2), str(1 / 3), str(-1.5e-7),
+    str(9007199254740993), str(123456789012345678), str(num("1_000")), str(num(" 0x1p-2 ")), str(num("1e-400")),
+    str(int(-2.7)), str(round(-2.5)), str(round(0.49999999999999994)),
+    "Straße".toUpperCase(), "İSTANBUL".toLowerCase(), "ǅ".toLowerCase(), "  trimmed　".trim(),
+    str(len("héllo")), "naïve café".slice(-4), str("aéb".indexOf("b")), "a,b".split("").join("|"),
+    str(bool("true")), str(min(0, -0) == 0)
+  ]
+}
+-- want --
+["-0", "-0", "1.5", "-1.25", "-2", "1000000000000000000000", "0.30000000000000004", "0.3333333333333333", "-0.00000015", "9007199254740992", "123456789012345680", "1000", "0.25", "0", "-2", "-3", "0", "STRAßE", "istanbul", "ǆ", "trimmed", "5", "café", "2", "a|,|b", "true", "true"]

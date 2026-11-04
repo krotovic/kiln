@@ -1,0 +1,18 @@
+[package]
+name = "kiln"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97"
+license = "MIT"
+description = "Kiln's Rust runtime: runs the WebAssembly modules its Go compiler makes (on wasmtime), and evaluates its expressions"
+repository = "https://github.com/krotovic/kiln"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"
+unicode-properties = { version = "0.1", default-features = false, features = ["general-category"] }
+wasmtime = { version = "50", default-features = false, features = ["cranelift", "runtime", "std", "parallel-compilation"] }
+
+[lints.rust]
+unsafe_code = "forbid"

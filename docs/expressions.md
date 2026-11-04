@@ -75,6 +75,26 @@ v, err := prog.Eval(language.MapEnv{"level": language.Num(3), "progress": langua
   [Text form and conversions](language-reference.md#text-form-and-conversions)). **`Convert`** and `ParseConversion`
   apply a type a content creator chose (`"number"`, `"integer"`, `"string"`, `"bool"`, or `""` for as is).
 
+### Embedding (Rust)
+
+The crate `kiln` (`rust/`) evaluates expressions with its own interpreter, a port of Go's, so a Rust host gives the
+same values and errors:
+
+```rust
+use kiln::expr::{Func, Library, Limits, Scope, compile};
+
+let lib = Library::std().with([Func::new("lerp", 3, Some(3), |args| {
+    let n = |i: usize| args[i].as_number().ok_or("lerp wants numbers");
+    Ok(Value::num(n(0)? + (n(1)? - n(0)?) * n(2)?))
+})]);
+let prog = compile("lerp(10, 50, progress) * level", &lib, &Scope::new(["level", "progress"]), &Limits::default())?;
+let v = prog.eval(&HashMap::from([("level".to_string(), Value::num(3.0)), ("progress".to_string(), Value::num(0.5))]))?;
+```
+
+`Library`, `Scope`, `Env` (a `HashMap<String, Value>`, or `FnEnv` over a function), `Program::names`,
+`Value::literal`, `convert` and `Conversion::parse` are Go's, and errors are `expr::Error` and `expr::EvalError`,
+with the same column and message.
+
 ### Tests
 
 `language/testdata/cases.json` holds the expression cases, shared by every implementation (a
@@ -84,7 +104,8 @@ TypeScript port on the client would run the same file, as `movement.json` is sha
 - `env`: the names' values, as JSON numbers, strings and bools.
 - Either `want` (the expected value, which must match in kind too) or `error`: `"compile"` or `"eval"`.
 
-To add a case, append it to `cases`; `TestSharedCases` runs them all. The cases cover numbers with `_` separators and
+To add a case, append it to `cases`; `TestSharedCases` runs them all, and so does the Rust interpreter
+(`rust/tests/expressions.rs`). The cases cover numbers with `_` separators and
 misplaced ones refused, precedence, string concatenation, the ternary, short-circuiting, every function and conversion,
 evaluation and compile errors. Behaviour outside a single expression is tested in `expr_test.go`: compile errors
 carrying their column; length, depth and size limits; a host library extended without changing `Std()`; the names an
