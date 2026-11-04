@@ -8,12 +8,13 @@ import (
 )
 
 // Request is what to compile: the host modules by their definition files, the scripts' sources by ID, and the
-// jobs. Imports lists scripts whose imports the response gives.
+// jobs. Imports lists scripts whose imports the response gives, and Describe host modules it describes.
 type Request struct {
-	Hosts   []Host            `json:"hosts"`
-	Scripts map[string]string `json:"scripts"`
-	Imports []string          `json:"imports,omitempty"`
-	Jobs    []Job             `json:"jobs"`
+	Hosts    []Host            `json:"hosts"`
+	Scripts  map[string]string `json:"scripts"`
+	Imports  []string          `json:"imports,omitempty"`
+	Describe []string          `json:"describe,omitempty"`
+	Jobs     []Job             `json:"jobs"`
 }
 
 // Host is a host module: its name, as scripts import it, and its definition file.
@@ -32,10 +33,19 @@ type Job struct {
 	Satisfies []string          `json:"satisfies,omitempty"`
 }
 
-// Response has the imports asked for, by script (none for a script that doesn't parse), and a result per job.
+// Response has the imports asked for, by script (none for a script that doesn't parse), the host modules asked
+// for described, by name, and a result per job.
 type Response struct {
-	Imports map[string][]string `json:"imports"`
-	Results []Result            `json:"results"`
+	Imports map[string][]string        `json:"imports"`
+	Hosts   map[string]HostDescription `json:"hosts,omitempty"`
+	Results []Result                   `json:"results"`
+}
+
+// HostDescription is what a host without the checker (Kiln's Rust runtime) needs of a host module: its interfaces
+// (for Class.Satisfies' checks) and the natives it must give code for.
+type HostDescription struct {
+	Interfaces map[string]language.InterfaceMeta `json:"interfaces"`
+	Natives    []string                          `json:"natives"`
 }
 
 // Result is a compiled script: its WebAssembly module (base64 in JSON), the IDs of its modules (the entry and the
@@ -79,6 +89,24 @@ func Compile(req Request) (*Response, error) {
 			imports = []string{}
 		}
 		resp.Imports[id] = imports
+	}
+	for _, name := range req.Describe {
+		h, ok := hosts[name]
+		if !ok {
+			return nil, fmt.Errorf("no host module %q to describe", name)
+		}
+		ifaces, err := h.Interfaces()
+		if err != nil {
+			return nil, fmt.Errorf("the host module %q: %w", name, err)
+		}
+		natives, err := h.DeclaredNatives()
+		if err != nil {
+			return nil, fmt.Errorf("the host module %q: %w", name, err)
+		}
+		if resp.Hosts == nil {
+			resp.Hosts = map[string]HostDescription{}
+		}
+		resp.Hosts[name] = HostDescription{Interfaces: ifaces, Natives: natives}
 	}
 	for _, job := range req.Jobs {
 		opts := language.ScriptOptions{Hosts: all}

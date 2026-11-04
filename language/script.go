@@ -92,6 +92,8 @@ type moduleInfo struct {
 	imports []string
 	// aliases are where names imported under another name (with as, or a default import) were imported
 	aliases map[string]Location
+	// natives are the names of a host module's natives, as Natives keys them
+	natives []string
 }
 
 func newModule(id, src string) *moduleInfo {
@@ -274,6 +276,25 @@ func (i *Interface) Meta() InterfaceMeta {
 			Text: f.typ.String()})
 	}
 	return out
+}
+
+// DeclaredNatives lists the natives the host module's definition file declares, sorted, by the names Natives keys
+// them by ("f", "C.m", "C.f"): the code a host must give.
+func (h *HostModule) DeclaredNatives() ([]string, error) {
+	m, diags := h.module()
+	if len(diags) > 0 {
+		return nil, DiagnosticsError(diags)
+	}
+	seen := map[string]bool{}
+	out := []string{}
+	for _, name := range m.natives {
+		if !seen[name] {
+			seen[name] = true
+			out = append(out, name)
+		}
+	}
+	sort.Strings(out)
+	return out, nil
 }
 
 // Interfaces describes every interface the host module exports, by name, for hosts without the checker
