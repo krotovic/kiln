@@ -54,7 +54,9 @@ kiln lsp -host game=game.d.als -host ui=ui.d.als -scheme alo -language alo-scrip
 - **Transport.** `ServeHTTP` upgrades to a WebSocket; each text frame is one JSON-RPC 2.0 message (no
   `Content-Length` framing), at most 1 MB. On a stream every message comes after its headers (`Content-Length`, which
   is required, and an optional `Content-Type`) and an empty line, as the base protocol has it, at most 64 MB. One
-  session per socket or stream.
+  session per socket or stream. A request's `id` is a number or a string, as LSP has it: one with a `null` id (or
+  any other) is refused with `-32600` and an id of `null` before anything reads it, `initialize` included, so a front
+  that lets only notifications through unchecked can't be talked past with `"id": null`.
 - **Authorization.** The first request must be `initialize`; its `initializationOptions` go to `Authorize`, whose
   error is the answer, and the socket closes. A request before `initialize` gets `-32002`, and a session that sends no
   `initialize` within `InitTimeout` is closed. A request with the method of one of `Notifications` is refused. The session's `Grant` is checked every `Watch`; once its `Check` fails
@@ -75,7 +77,8 @@ kiln lsp -host game=game.d.als -host ui=ui.d.als -scheme alo -language alo-scrip
 
 ## Tests
 
-- `lsp`: sessions over a real WebSocket against a test host module: requests before `initialize` refused,
+- `lsp`: sessions over a real WebSocket against a test host module: requests before `initialize` refused, requests
+  with a `null` or an object id refused (an `initialize` with a `null` id initializing nothing),
   `Authorize`'s error answered and the session closed, a failing grant ending the session, a socket without
   `initialize` closed; diagnostics following open documents and the open scripts importing them, with ranges, and
   cleared on close; hover, definition, completion, signature help, symbols, references, prepareRename and rename
@@ -91,4 +94,4 @@ kiln lsp -host game=game.d.als -host ui=ui.d.als -scheme alo -language alo-scrip
   `-module`, stray arguments), and a session on its standard streams: stored scripts from `<scheme>/scripts`, hover in
   a host module, a host's definition file through `<scheme>/source`, IDs `-module` refuses, and `exit`.
 - `lsp/lsptest` is the client the tests use, exported so hosts can test the server they configure: `Dial`, `Stream`
-  and `New` (on any `Conn`), `Call`, `Notify`, `Initialize`, `Open`, `Diagnostics`, `WaitClosed` and `Pos`.
+  and `New` (on any `Conn`), `Call`, `Notify`, `Send` (any message, as it is), `Initialize`, `Open`, `Diagnostics`, `WaitClosed` and `Pos`.

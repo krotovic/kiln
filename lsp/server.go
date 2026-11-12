@@ -274,9 +274,27 @@ func (ss *session) watch() {
 	}
 }
 
+// validID reports whether a request's id is one LSP allows: a number or a string (null is JSON-RPC's, not LSP's).
+func validID(id json.RawMessage) bool {
+	var v any
+	if json.Unmarshal(id, &v) != nil {
+		return false
+	}
+	switch v.(type) {
+	case float64, string:
+		return true
+	}
+	return false
+}
+
 // handle answers one request or notification; false ends the session.
 func (ss *session) handle(msg *message) bool {
 	isRequest := len(msg.ID) > 0
+	// A request with an id of null (or of any other type) is refused before anything reads it, initialize included
+	if isRequest && !validID(msg.ID) {
+		ss.replyError(json.RawMessage("null"), codeInvalidRequest, "a request's id is a number or a string")
+		return true
+	}
 	if notify, ok := ss.srv.opts.Notifications[msg.Method]; ok {
 		if isRequest {
 			ss.replyError(msg.ID, codeInvalidRequest, msg.Method+" is a notification")

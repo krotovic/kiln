@@ -88,6 +88,9 @@ func (c wsConn) WriteMessage(data []byte) error {
 
 func (c wsConn) Close() error { return c.conn.Close() }
 
+// Send sends v as one message, as it is: a test's malformed request, say. Its answer comes on In.
+func (c *Client) Send(v any) { c.send(v) }
+
 func (c *Client) send(v any) {
 	data, _ := json.Marshal(v)
 	if err := c.conn.WriteMessage(data); err != nil {
