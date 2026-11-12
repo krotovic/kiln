@@ -16,6 +16,7 @@ import (
 )
 
 const (
+	codeInvalidRequest       = -32600
 	codeMethodNotFound       = -32601
 	codeServerNotInitialized = -32002
 	maxDocuments             = 64
@@ -155,6 +156,39 @@ func TestSessionsAreAuthorizedByTheHost(t *testing.T) {
 	// A grant failing later ends the session
 	f.revoked.Store(true)
 	c.WaitClosed("a revoked grant")
+}
+
+func TestRequestsNeedANumberOrAStringID(t *testing.T) {
+	f := newFixture(t, nil)
+	c := f.dial()
+	// An initialize with a null id doesn't initialize, even with a good token
+	c.Send(map[string]any{"jsonrpc": "2.0", "id": nil, "method": "initialize",
+		"params": map[string]any{"initializationOptions": map[string]any{"token": "me"}}})
+	select {
+	case m := <-c.In:
+		if m.Error == nil || m.Error.Code != codeInvalidRequest || string(m.ID) != "null" {
+			t.Fatalf("initialize with a null id: %+v", m)
+		}
+	case <-time.After(c.Timeout):
+		t.Fatal("no answer to initialize with a null id")
+	}
+	if m := c.Call("textDocument/hover", lsptest.Pos("alo:/script/util", 0, 0)); m.Error == nil || m.Error.Code != codeServerNotInitialized {
+		t.Fatalf("a request after it: %+v", m)
+	}
+	// Nor does an id of another type, once initialized
+	if m := c.Initialize(map[string]any{"token": "me"}); m.Error != nil {
+		t.Fatalf("initialize: %+v", m.Error)
+	}
+	c.Send(map[string]any{"jsonrpc": "2.0", "id": map[string]any{"x": 1}, "method": "textDocument/hover",
+		"params": lsptest.Pos("alo:/script/util", 0, 0)})
+	select {
+	case m := <-c.In:
+		if m.Error == nil || m.Error.Code != codeInvalidRequest {
+			t.Fatalf("an object id: %+v", m)
+		}
+	case <-time.After(c.Timeout):
+		t.Fatal("no answer to a request with an object id")
+	}
 }
 
 func TestSessionsEndWithoutInitialize(t *testing.T) {
